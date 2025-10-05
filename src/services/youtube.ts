@@ -92,43 +92,59 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
   const ytDlp = await findYtDlp()
   const cookiesPath = getCookiesPath()
   
-  return new Promise((resolve, reject) => {
-    let errorOutput = ''
-    
-    const args = [
-      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-      '--merge-output-format', 'mp4',
-      '--extractor-args', 'youtube:player_client=ios'
-    ]
-    
-    if (cookiesPath)
-    {
-      args.push('--cookies', cookiesPath)
+  const playerClients = ['ios', 'android', 'web']
+  let lastError: Error | null = null
+  
+  for (const client of playerClients) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let errorOutput = ''
+        
+        const args = [
+          '-f', 'best[ext=mp4]/bestvideo*+bestaudio/best',
+          '--merge-output-format', 'mp4',
+          '--extractor-args', `youtube:player_client=${client}`
+        ]
+        
+        if (cookiesPath)
+        {
+          args.push('--cookies', cookiesPath)
+        }
+        
+        args.push('-o', outputPath, url)
+        
+        const process = spawn(ytDlp, args)
+        
+        process.stderr.on('data', (data) => {
+          errorOutput += data.toString()
+        })
+        
+        process.stdout.on('data', (data) => {
+          console.log(data.toString())
+        })
+        
+        process.on('close', (code) => {
+          if (code === 0)
+          {
+            resolve()
+          }
+          else
+          {
+            reject(new Error(`yt-dlp exited with code ${code}: ${errorOutput}`))
+          }
+        })
+        
+        process.on('error', reject)
+      })
+      
+      return
     }
-    
-    args.push('-o', outputPath, url)
-    
-    const process = spawn(ytDlp, args)
-    
-    process.stderr.on('data', (data) => {
-      errorOutput += data.toString()
-    })
-    
-    process.stdout.on('data', (data) => {
-      console.log(data.toString())
-    })
-    
-    process.on('close', (code) => {
-      if (code === 0)
-      {
-        resolve()
-      }
-      else
-      {
-        reject(new Error(`yt-dlp exited with code ${code}: ${errorOutput}`))
-      }
-    })
-    
-    process.on('error', reject)
-  })
+    catch (error: any) {
+      lastError = error
+      console.log(`Failed with client ${client}, trying next...`)
+      continue
+    }
+  }
+  
+  throw lastError || new Error('Failed to download video with all player clients')
 }

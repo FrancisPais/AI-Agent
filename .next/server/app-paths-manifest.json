@@ -2,6 +2,7 @@
   "/page": "app/page.js",
   "/login/page": "app/login/page.js",
   "/api/auth/status/route": "app/api/auth/status/route.js",
-  "/api/auth/login/route": "app/api/auth/login/route.js",
-  "/api/videos/route": "app/api/videos/route.js"
+  "/api/videos/route": "app/api/videos/route.js",
+  "/videos/[id]/page": "app/videos/[id]/page.js",
+  "/api/videos/[id]/route": "app/api/videos/[id]/route.js"
 }
