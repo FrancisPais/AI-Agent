@@ -39,6 +39,16 @@ export default function SetupCookiesPage() {
     }
   }
 
+  async function handleLogout() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+      router.push('/login')
+    }
+    catch (err) {
+      console.error('Failed to logout:', err)
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setLoading(true)
@@ -128,7 +138,17 @@ export default function SetupCookiesPage() {
           
           {error && (
             <div className="mb-6 p-4 bg-red-900/50 border border-red-700 rounded-lg">
-              <p className="text-red-200 text-sm">{error}</p>
+              <p className="text-red-200 text-sm mb-2">{error}</p>
+              {
+                error.includes('sign in again') && (
+                  <button
+                    onClick={handleLogout}
+                    className="mt-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+                  >
+                    Sign in again
+                  </button>
+                )
+              }
             </div>
           )}
           

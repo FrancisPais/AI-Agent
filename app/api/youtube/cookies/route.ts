@@ -86,6 +86,18 @@ export async function POST(request: NextRequest) {
       )
     }
     
+    const user = await prisma.user.findUnique({
+      where: { id: session.userId }
+    })
+    
+    if (!user)
+    {
+      return NextResponse.json(
+        { error: 'User not found. Please sign in again.' },
+        { status: 404 }
+      )
+    }
+    
     const encryptedCookies = encrypt(cookiesText)
     
     await prisma.user.update({

@@ -1,1 +1,6 @@
-{}
+{
+  "/page": "app/page.js",
+  "/api/auth/status/route": "app/api/auth/status/route.js",
+  "/api/me/connections/route": "app/api/me/connections/route.js",
+  "/setup-cookies/page": "app/setup-cookies/page.js"
+}
