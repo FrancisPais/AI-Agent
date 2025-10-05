@@ -58,6 +58,45 @@ export async function extractAudio(videoPath: string, outputPath: string): Promi
   })
 }
 
+export async function splitAudioIntoChunks(audioPath: string, chunkDurationSeconds: number): Promise<string[]> {
+  const chunks: string[] = []
+  const audioDir = audioPath.substring(0, audioPath.lastIndexOf('/'))
+  const audioExt = audioPath.substring(audioPath.lastIndexOf('.'))
+  
+  const ffmpegPath = ffmpegStatic || 'ffmpeg'
+  const getDurationCmd = `${ffmpegPath} -i "${audioPath}" 2>&1 | grep "Duration" | cut -d ' ' -f 4 | sed s/,//`
+  
+  try {
+    const { stdout: durationStr } = await execPromise(getDurationCmd)
+    const [hours, minutes, seconds] = durationStr.trim().split(':').map(parseFloat)
+    const totalDuration = hours * 3600 + minutes * 60 + seconds
+    
+    const numChunks = Math.ceil(totalDuration / chunkDurationSeconds)
+    
+    for (let i = 0; i < numChunks; i++) {
+      const startTime = i * chunkDurationSeconds
+      const chunkPath = join(audioDir, `chunk_${i}${audioExt}`)
+      
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg(audioPath)
+          .setStartTime(startTime)
+          .duration(chunkDurationSeconds)
+          .audioCodec('libmp3lame')
+          .output(chunkPath)
+          .on('end', () => resolve())
+          .on('error', reject)
+          .run()
+      })
+      
+      chunks.push(chunkPath)
+    }
+    
+    return chunks
+  } catch (error) {
+    throw new Error(`Failed to split audio: ${error}`)
+  }
+}
+
 export interface RenderOptions {
   inputPath: string
   outputPath: string

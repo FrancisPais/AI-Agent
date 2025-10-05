@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
-import { createReadStream } from 'fs'
+import { createReadStream, statSync } from 'fs'
+import { splitAudioIntoChunks } from './ffmpeg'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -20,7 +21,9 @@ export interface TranscriptSegment {
   words: TranscriptWord[]
 }
 
-export async function transcribeAudio(audioPath: string): Promise<TranscriptSegment[]> {
+const MAX_FILE_SIZE = 20 * 1024 * 1024
+
+async function transcribeAudioFile(audioPath: string, timeOffset: number = 0): Promise<TranscriptWord[]> {
   const response = await openai.audio.transcriptions.create({
     file: createReadStream(audioPath),
     model: 'whisper-1',
@@ -28,59 +31,83 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptSegm
     timestamp_granularities: ['word']
   })
 
-  const segments: TranscriptSegment[] = []
+  const words: TranscriptWord[] = []
   
-  if (response.words)
-  {
-    let currentSegment: TranscriptWord[] = []
-    let segmentStart = 0
-    let segmentText = ''
-    
-    for (let i = 0; i < response.words.length; i++)
-    {
-      const word = response.words[i]
-      
-      if (currentSegment.length === 0)
-      {
-        segmentStart = word.start
-      }
-      
-      currentSegment.push({
+  if (response.words) {
+    for (const word of response.words) {
+      words.push({
         word: word.word,
-        start: word.start,
-        end: word.end
+        start: word.start + timeOffset,
+        end: word.end + timeOffset
       })
-      
-      segmentText += word.word + ' '
-      
-      if (i < response.words.length - 1)
-      {
-        const gap = response.words[i + 1].start - word.end
-        
-        if (gap > 0.9 || currentSegment.length >= 50)
-        {
-          segments.push({
-            text: segmentText.trim(),
-            start: segmentStart,
-            end: word.end,
-            words: currentSegment
-          })
-          
-          currentSegment = []
-          segmentText = ''
-        }
-      }
+    }
+  }
+  
+  return words
+}
+
+export async function transcribeAudio(audioPath: string): Promise<TranscriptSegment[]> {
+  const fileSize = statSync(audioPath).size
+  let allWords: TranscriptWord[] = []
+  
+  if (fileSize > MAX_FILE_SIZE) {
+    console.log(`Audio file is ${(fileSize / 1024 / 1024).toFixed(1)}MB, splitting into chunks...`)
+    const chunkDuration = 600
+    const chunks = await splitAudioIntoChunks(audioPath, chunkDuration)
+    
+    for (let i = 0; i < chunks.length; i++) {
+      console.log(`Transcribing chunk ${i + 1}/${chunks.length}`)
+      const chunkWords = await transcribeAudioFile(chunks[i], i * chunkDuration)
+      allWords = allWords.concat(chunkWords)
+    }
+  } else {
+    allWords = await transcribeAudioFile(audioPath)
+  }
+
+  const segments: TranscriptSegment[] = []
+  let currentSegment: TranscriptWord[] = []
+  let segmentStart = 0
+  let segmentText = ''
+  
+  for (let i = 0; i < allWords.length; i++)
+  {
+    const word = allWords[i]
+    
+    if (currentSegment.length === 0)
+    {
+      segmentStart = word.start
     }
     
-    if (currentSegment.length > 0)
+    currentSegment.push(word)
+    segmentText += word.word + ' '
+    
+    if (i < allWords.length - 1)
     {
-      segments.push({
-        text: segmentText.trim(),
-        start: segmentStart,
-        end: currentSegment[currentSegment.length - 1].end,
-        words: currentSegment
-      })
+      const gap = allWords[i + 1].start - word.end
+      
+      if (gap > 0.9 || currentSegment.length >= 50)
+      {
+        segments.push({
+          text: segmentText.trim(),
+          start: segmentStart,
+          end: word.end,
+          words: currentSegment
+        })
+        
+        currentSegment = []
+        segmentText = ''
+      }
     }
+  }
+  
+  if (currentSegment.length > 0)
+  {
+    segments.push({
+      text: segmentText.trim(),
+      start: segmentStart,
+      end: currentSegment[currentSegment.length - 1].end,
+      words: currentSegment
+    })
   }
   
   return segments
