@@ -56,10 +56,11 @@ export async function getVideoMetadata(url: string): Promise<VideoMetadata> {
   const cookiesPath = getCookiesPath()
   
   const strategies = [
-    { client: 'ios', skipAvailabilityCheck: false },
-    { client: 'android', skipAvailabilityCheck: false },
-    { client: 'web', skipAvailabilityCheck: true },
-    { client: 'mweb', skipAvailabilityCheck: true }
+    { client: 'ios', skipAvailabilityCheck: false, useBrowserCookies: false },
+    { client: 'android', skipAvailabilityCheck: false, useBrowserCookies: false },
+    { client: 'web', skipAvailabilityCheck: true, useBrowserCookies: false },
+    { client: 'mweb', skipAvailabilityCheck: true, useBrowserCookies: false },
+    { client: 'web', skipAvailabilityCheck: true, useBrowserCookies: true }
   ]
   
   let lastError: Error | null = null
@@ -79,6 +80,10 @@ export async function getVideoMetadata(url: string): Promise<VideoMetadata> {
       if (cookiesPath)
       {
         cmd += ` --cookies "${cookiesPath}"`
+      }
+      else if (strategy.useBrowserCookies)
+      {
+        cmd += ` --cookies-from-browser chrome`
       }
       
       cmd += ` "${url}"`
@@ -106,10 +111,11 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
   const cookiesPath = getCookiesPath()
   
   const strategies = [
-    { client: 'ios', skipAvailabilityCheck: false },
-    { client: 'android', skipAvailabilityCheck: false },
-    { client: 'web', skipAvailabilityCheck: true },
-    { client: 'mweb', skipAvailabilityCheck: true }
+    { client: 'ios', skipAvailabilityCheck: false, useBrowserCookies: false },
+    { client: 'android', skipAvailabilityCheck: false, useBrowserCookies: false },
+    { client: 'web', skipAvailabilityCheck: true, useBrowserCookies: false },
+    { client: 'mweb', skipAvailabilityCheck: true, useBrowserCookies: false },
+    { client: 'web', skipAvailabilityCheck: true, useBrowserCookies: true }
   ]
   
   let lastError: Error | null = null
@@ -135,6 +141,10 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
         if (cookiesPath)
         {
           args.push('--cookies', cookiesPath)
+        }
+        else if (strategy.useBrowserCookies)
+        {
+          args.push('--cookies-from-browser', 'chrome')
         }
         
         args.push('-o', outputPath, url)
