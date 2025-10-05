@@ -118,17 +118,19 @@ export async function renderVerticalClip(options: RenderOptions): Promise<void> 
       .duration(duration)
       .size('1080x1920')
       .fps(30)
-      .videoBitrate('4000k')
       .videoCodec('libx264')
       .outputOptions([
-        '-preset', 'veryfast',
-        '-crf', '23',
+        '-preset', 'medium',
+        '-crf', '18',
+        '-profile:v', 'high',
+        '-level', '4.2',
         '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
         '-vf', `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=${escapedSrtPath}:force_style='Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=3,Outline=2,Shadow=0,MarginV=80',drawtext=text='${escapedHookText}':fontsize=32:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=72`,
         '-af', 'loudnorm=I=-14:LRA=11:TP=-1.5'
       ])
       .audioCodec('aac')
-      .audioBitrate('128k')
+      .audioBitrate('192k')
       .output(outputPath)
       .on('end', () => resolve())
       .on('error', reject)

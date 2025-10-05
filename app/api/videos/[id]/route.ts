@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/src/lib/prisma'
-import { getS3Url } from '@/src/services/s3'
+import { getSignedUrlForKey } from '@/src/services/s3'
 import { requireAuth } from '@/src/lib/session'
 
 export async function GET(
@@ -27,12 +27,14 @@ export async function GET(
       )
     }
     
-    const clipsWithUrls = video.clips.map(clip => ({
-      ...clip,
-      videoUrl: getS3Url(clip.s3VideoKey),
-      thumbUrl: getS3Url(clip.s3ThumbKey),
-      srtUrl: getS3Url(clip.s3SrtKey)
-    }))
+    const clipsWithUrls = await Promise.all(
+      video.clips.map(async (clip) => ({
+        ...clip,
+        videoUrl: await getSignedUrlForKey(clip.s3VideoKey, 7200),
+        thumbUrl: await getSignedUrlForKey(clip.s3ThumbKey, 7200),
+        srtUrl: await getSignedUrlForKey(clip.s3SrtKey, 7200)
+      }))
+    )
     
     return NextResponse.json({
       ...video,
