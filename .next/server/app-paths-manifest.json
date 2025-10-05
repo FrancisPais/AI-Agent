@@ -3,5 +3,6 @@
   "/login/page": "app/login/page.js",
   "/videos/[id]/page": "app/videos/[id]/page.js",
   "/api/submit/route": "app/api/submit/route.js",
-  "/api/videos/route": "app/api/videos/route.js"
+  "/api/videos/route": "app/api/videos/route.js",
+  "/api/videos/[id]/route": "app/api/videos/[id]/route.js"
 }
