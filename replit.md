@@ -13,6 +13,27 @@ Code style constraints:
 - Always put single if conditions inside brackets with line breaks
 - Focus on clean, self-documenting code
 
+## Per-User Authentication System
+
+**OAuth 2.0 Flow**:
+- Users sign in with Google OAuth (youtube.readonly, email, profile scopes)
+- OAuth tokens stored encrypted in database per user
+- Automatic token refresh for expired credentials
+
+**Cookie Management**:
+- Each user uploads their YouTube cookies in Netscape format
+- Cookies stored encrypted in database (AES-256-GCM)
+- Cookies validated for required fields (SAPISID, HSID, SSID)
+- Materialized to temp files with chmod 600 during yt-dlp operations
+- Temp files deleted immediately after use
+- Last used timestamp tracked per user
+
+**Video Processing**:
+- Videos linked to user accounts
+- Worker fetches user cookies for each job
+- Fails fast if user cookies not configured
+- Secure temp file handling with automatic cleanup
+
 ## System Architecture
 
 ### Frontend Architecture
@@ -117,6 +138,9 @@ S3_REGION
 S3_ACCESS_KEY_ID
 S3_SECRET_ACCESS_KEY
 S3_BUCKET
+GOOGLE_CLIENT_ID (for OAuth 2.0)
+GOOGLE_CLIENT_SECRET (for OAuth 2.0)
+GOOGLE_REDIRECT_URI (optional, auto-detected from REPLIT_DOMAINS)
 YT_DLP_PATH (optional, defaults to system PATH)
 ```
 
