@@ -4,7 +4,15 @@ import { requireAuth } from '@/src/lib/session'
 
 export async function GET(request: NextRequest) {
   try {
-    await requireAuth()
+    const session = await requireAuth()
+    
+    if (!session.userId)
+    {
+      return NextResponse.json(
+        { error: 'User ID not found in session' },
+        { status: 401 }
+      )
+    }
     
     const searchParams = request.nextUrl.searchParams
     const q = searchParams.get('q') || ''
@@ -12,12 +20,15 @@ export async function GET(request: NextRequest) {
     const pageSize = Math.min(100, Math.max(1, parseInt(searchParams.get('pageSize') || '20')))
     const sort = searchParams.get('sort') || 'createdAt'
     
-    const where = q ? {
-      OR: [
+    const where: any = { userId: session.userId }
+    
+    if (q)
+    {
+      where.OR = [
         { title: { contains: q, mode: 'insensitive' as const } },
         { sourceUrl: { contains: q, mode: 'insensitive' as const } }
       ]
-    } : {}
+    }
     
     const orderBy = sort === 'createdAt' ? { createdAt: 'desc' as const } : { updatedAt: 'desc' as const }
     

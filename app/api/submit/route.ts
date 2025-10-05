@@ -18,7 +18,28 @@ function sanitizeUrl(url: string): string {
 
 export async function POST(request: NextRequest) {
   try {
-    await requireAuth()
+    const session = await requireAuth()
+    
+    if (!session.userId)
+    {
+      return NextResponse.json(
+        { error: 'User ID not found in session' },
+        { status: 401 }
+      )
+    }
+    
+    const user = await prisma.user.findUnique({
+      where: { id: session.userId },
+      select: { youtubeCookies: true }
+    })
+    
+    if (!user || !user.youtubeCookies)
+    {
+      return NextResponse.json(
+        { error: 'YouTube cookies not configured. Please upload your YouTube cookies first.' },
+        { status: 401 }
+      )
+    }
     
     const body = await request.json()
     const { url } = body
@@ -33,10 +54,11 @@ export async function POST(request: NextRequest) {
     
     const sanitizedUrl = sanitizeUrl(url)
     
-    const metadata = await getVideoMetadata(sanitizedUrl)
+    const metadata = await getVideoMetadata(sanitizedUrl, session.userId)
     
     const video = await prisma.video.create({
       data: {
+        userId: session.userId,
         sourceUrl: sanitizedUrl,
         title: metadata.title,
         durationSec: metadata.duration,
@@ -45,7 +67,8 @@ export async function POST(request: NextRequest) {
     })
     
     await videoQueue.add('process', {
-      videoId: video.id
+      videoId: video.id,
+      userId: session.userId
     })
     
     return NextResponse.json({
@@ -69,6 +92,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Invalid YouTube URL' },
         { status: 400 }
+      )
+    }
+    
+    if (error.message.includes('YouTube cookies'))
+    {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 401 }
       )
     }
     

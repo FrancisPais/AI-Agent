@@ -22,6 +22,7 @@ export default function Home() {
   const [videos, setVideos] = useState<Video[]>([])
   const [error, setError] = useState('')
   const [authStatus, setAuthStatus] = useState<any>(null)
+  const [connections, setConnections] = useState<any>(null)
   const router = useRouter()
 
   useEffect(() => {
@@ -34,14 +35,23 @@ export default function Home() {
       const data = await res.json()
       setAuthStatus(data)
       
-      if (!data.isAuthenticated || !data.youtubeConnected)
+      if (!data.isAuthenticated)
       {
         router.push('/login')
+        return
       }
-      else
+      
+      const connectionsRes = await fetch('/api/me/connections')
+      const connectionsData = await connectionsRes.json()
+      setConnections(connectionsData)
+      
+      if (!connectionsData.hasCookies)
       {
-        fetchVideos()
+        router.push('/setup-cookies')
+        return
       }
+      
+      fetchVideos()
     }
     catch (err) {
       console.error('Failed to check auth:', err)
@@ -105,7 +115,7 @@ export default function Home() {
     }
   }
 
-  if (!authStatus)
+  if (!authStatus || !connections)
   {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -121,9 +131,22 @@ export default function Home() {
           <h1 className="text-4xl font-bold">YT Shortsmith</h1>
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-sm text-gray-400">YouTube Connected</span>
+              <div className={`w-2 h-2 rounded-full ${connections.hasCookies ? 'bg-green-500' : 'bg-red-500'}`}></div>
+              <span className="text-sm text-gray-400">
+                {connections.hasCookies ? 'YouTube Connected' : 'No Cookies'}
+              </span>
             </div>
+            {connections.hasCookies && connections.cookiesLastUsedAt && (
+              <span className="text-xs text-gray-500">
+                Last used: {new Date(connections.cookiesLastUsedAt).toLocaleDateString()}
+              </span>
+            )}
+            <Link
+              href="/setup-cookies"
+              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+            >
+              Update Cookies
+            </Link>
             <button
               onClick={handleLogout}
               className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
@@ -132,6 +155,14 @@ export default function Home() {
             </button>
           </div>
         </div>
+        
+        {!connections.hasCookies && (
+          <div className="mb-6 p-4 bg-yellow-900/50 border border-yellow-700 rounded-lg">
+            <p className="text-yellow-200 text-sm">
+              YouTube cookies not configured. Please <Link href="/setup-cookies" className="underline">upload your cookies</Link> to submit videos.
+            </p>
+          </div>
+        )}
         
         <div className="bg-gray-800 p-6 rounded-lg mb-8">
           <h2 className="text-xl font-semibold mb-4">Submit YouTube Video</h2>
@@ -142,11 +173,11 @@ export default function Home() {
               onChange={(e) => setUrl(e.target.value)}
               placeholder="Enter YouTube URL"
               className="flex-1 px-4 py-2 bg-gray-700 rounded border border-gray-600 focus:outline-none focus:border-blue-500"
-              disabled={loading}
+              disabled={loading || !connections.hasCookies}
             />
             <button
               type="submit"
-              disabled={loading || !url}
+              disabled={loading || !url || !connections.hasCookies}
               className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-semibold"
             >
               {

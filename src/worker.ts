@@ -1,7 +1,7 @@
 import { Worker, Job } from 'bullmq'
 import { connection } from './lib/queue'
 import { prisma } from './lib/prisma'
-import { getVideoMetadata, downloadVideo } from './services/youtube'
+import { getVideoMetadata, downloadVideo, cleanupUserCookiesFile } from './services/youtube'
 import { extractAudio, renderVerticalClip, extractThumbnail, createSrtFile, detectScenes } from './services/ffmpeg'
 import { transcribeAudio } from './services/openai'
 import { scoreClip } from './services/openai'
@@ -13,10 +13,16 @@ import { tmpdir } from 'os'
 
 interface VideoJob {
   videoId: string
+  userId: string
 }
 
 async function processVideo(job: Job<VideoJob>) {
-  const { videoId } = job.data
+  const { videoId, userId } = job.data
+  
+  if (!userId)
+  {
+    throw new Error('User ID is required for video processing')
+  }
   
   await prisma.video.update({
     where: { id: videoId },
@@ -24,12 +30,18 @@ async function processVideo(job: Job<VideoJob>) {
   })
   
   const video = await prisma.video.findUnique({
-    where: { id: videoId }
+    where: { id: videoId },
+    include: { user: true }
   })
   
   if (!video)
   {
     throw new Error(`Video ${videoId} not found`)
+  }
+  
+  if (!video.user.youtubeCookies)
+  {
+    throw new Error('YouTube cookies not configured. Please upload your YouTube cookies.')
   }
   
   const workDir = join(tmpdir(), `video_${videoId}`)
@@ -44,7 +56,7 @@ async function processVideo(job: Job<VideoJob>) {
     const audioPath = join(workDir, 'audio.mp3')
     
     console.log(`Downloading video: ${video.sourceUrl}`)
-    await downloadVideo(video.sourceUrl, videoPath)
+    await downloadVideo(video.sourceUrl, videoPath, userId)
     
     console.log(`Extracting audio`)
     await extractAudio(videoPath, audioPath)
@@ -151,6 +163,8 @@ async function processVideo(job: Job<VideoJob>) {
     throw error
   }
   finally {
+    cleanupUserCookiesFile(userId)
+    
     if (existsSync(workDir))
     {
       rmSync(workDir, { recursive: true, force: true })
