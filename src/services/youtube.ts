@@ -55,13 +55,26 @@ export async function getVideoMetadata(url: string): Promise<VideoMetadata> {
   const ytDlp = await findYtDlp()
   const cookiesPath = getCookiesPath()
   
-  const playerClients = ['ios', 'android', 'web']
+  const strategies = [
+    { client: 'ios', skipAvailabilityCheck: false },
+    { client: 'android', skipAvailabilityCheck: false },
+    { client: 'web', skipAvailabilityCheck: true },
+    { client: 'mweb', skipAvailabilityCheck: true }
+  ]
+  
   let lastError: Error | null = null
   
-  for (const client of playerClients)
+  for (const strategy of strategies)
   {
     try {
-      let cmd = `${ytDlp} --dump-json --no-download --extractor-args "youtube:player_client=${client}"`
+      let cmd = `${ytDlp} --dump-json --no-download --extractor-args "youtube:player_client=${strategy.client}`
+      
+      if (strategy.skipAvailabilityCheck)
+      {
+        cmd += `;skip=authcheck`
+      }
+      
+      cmd += `"`
       
       if (cookiesPath)
       {
@@ -92,18 +105,31 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
   const ytDlp = await findYtDlp()
   const cookiesPath = getCookiesPath()
   
-  const playerClients = ['ios', 'android', 'web']
+  const strategies = [
+    { client: 'ios', skipAvailabilityCheck: false },
+    { client: 'android', skipAvailabilityCheck: false },
+    { client: 'web', skipAvailabilityCheck: true },
+    { client: 'mweb', skipAvailabilityCheck: true }
+  ]
+  
   let lastError: Error | null = null
   
-  for (const client of playerClients) {
+  for (const strategy of strategies) {
     try {
       await new Promise<void>((resolve, reject) => {
         let errorOutput = ''
         
+        let extractorArgs = `youtube:player_client=${strategy.client}`
+        
+        if (strategy.skipAvailabilityCheck)
+        {
+          extractorArgs += `;skip=authcheck`
+        }
+        
         const args = [
           '-f', 'best[ext=mp4]/bestvideo*+bestaudio/best',
           '--merge-output-format', 'mp4',
-          '--extractor-args', `youtube:player_client=${client}`
+          '--extractor-args', extractorArgs
         ]
         
         if (cookiesPath)
@@ -141,7 +167,7 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
     }
     catch (error: any) {
       lastError = error
-      console.log(`Failed with client ${client}, trying next...`)
+      console.log(`Failed with client ${strategy.client}, trying next...`)
       continue
     }
   }
