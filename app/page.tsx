@@ -1,99 +1,166 @@
-"use client";
+'use client'
 
-import { useState } from "react";
+import { useState, useEffect } from 'react'
+import Link from 'next/link'
+
+interface Video {
+  id: string
+  title: string
+  sourceUrl: string
+  status: string
+  durationSec: number
+  createdAt: string
+  _count: {
+    clips: number
+  }
+}
 
 export default function Home() {
-  const [channelUrl, setChannelUrl] = useState("");
-  const [uploadsId, setUploadsId] = useState<string | null>(null);
-  const [videos, setVideos] = useState<{ videoId: string; title: string }[]>(
-    []
-  );
-  const [logs, setLogs] = useState<string[]>([]);
+  const [url, setUrl] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [videos, setVideos] = useState<Video[]>([])
+  const [error, setError] = useState('')
 
-  async function addChannel() {
-    const res = await fetch("/api/add-channel", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelUrl }),
-    });
-    const json = await res.json();
-    setUploadsId(json.uploadsPlaylistId);
+  useEffect(() => {
+    fetchVideos()
+  }, [])
+
+  async function fetchVideos() {
+    try {
+      const response = await fetch('/api/videos')
+      const data = await response.json()
+      
+      if (response.ok) {
+        setVideos(data.videos)
+      }
+    }
+    catch (err) {
+      console.error('Error fetching videos:', err)
+    }
   }
 
-  async function fetchLatest() {
-    const res = await fetch("/api/list-latest?uploadsId=" + uploadsId);
-    const json = await res.json();
-    setVideos(json.videos);
-  }
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
 
-  async function process(videoId: string, title: string) {
-    const res = await fetch("/api/process-video", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ videoId, title }),
-    });
-    const json = await res.json();
-    setLogs((l) => [JSON.stringify(json), ...l]);
+    try {
+      const response = await fetch('/api/submit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ url })
+      })
+
+      const data = await response.json()
+
+      if (response.ok) {
+        setUrl('')
+        fetchVideos()
+      }
+      else {
+        setError(data.error || 'Failed to submit video')
+      }
+    }
+    catch (err) {
+      setError('Failed to submit video')
+    }
+    finally {
+      setLoading(false)
+    }
   }
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">AI Short-Cutter MVP</h1>
-      <div className="flex gap-2">
-        <input
-          value={channelUrl}
-          onChange={(e) => setChannelUrl(e.target.value)}
-          placeholder="YouTube channel URL"
-          className="flex-1 px-3 py-2 rounded bg-neutral-900 border border-neutral-700"
-        />
-        <button onClick={addChannel} className="px-4 py-2 rounded bg-blue-600">
-          Add
-        </button>
-      </div>
-      {uploadsId && (
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <div className="text-sm">Uploads playlist: {uploadsId}</div>
+    <div className="min-h-screen p-8">
+      <div className="max-w-6xl mx-auto">
+        <h1 className="text-4xl font-bold mb-8">YT Shortsmith</h1>
+        
+        <div className="bg-gray-800 p-6 rounded-lg mb-8">
+          <h2 className="text-xl font-semibold mb-4">Submit YouTube Video</h2>
+          <form onSubmit={handleSubmit} className="flex gap-4">
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="Enter YouTube URL"
+              className="flex-1 px-4 py-2 bg-gray-700 rounded border border-gray-600 focus:outline-none focus:border-blue-500"
+              disabled={loading}
+            />
             <button
-              onClick={fetchLatest}
-              className="px-3 py-1 rounded bg-neutral-800 border border-neutral-700 text-sm"
+              type="submit"
+              disabled={loading || !url}
+              className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-semibold"
             >
-              Fetch latest
+              {
+                loading ? 'Submitting...' : 'Submit'
+              }
             </button>
-          </div>
-          <div className="space-y-2">
-            {videos.map((v) => (
-              <div
-                key={v.videoId}
-                className="flex items-center justify-between p-3 rounded bg-neutral-900 border border-neutral-800"
-              >
-                <div className="text-sm truncate max-w-[70%]">
-                  {v.title} ({v.videoId})
-                </div>
-                <button
-                  onClick={() => process(v.videoId, v.title)}
-                  className="px-3 py-1 rounded bg-green-600 text-sm"
-                >
-                  Process
-                </button>
-              </div>
-            ))}
-          </div>
+          </form>
+          {
+            error && (
+              <p className="text-red-500 mt-2">{error}</p>
+            )
+          }
         </div>
-      )}
-      <div className="space-y-2">
-        <h2 className="text-xl">Logs</h2>
-        <div className="space-y-2">
-          {logs.map((x, i) => (
-            <pre
-              key={i}
-              className="text-xs whitespace-pre-wrap bg-neutral-900 p-3 rounded border border-neutral-800"
-            >
-              {x}
-            </pre>
-          ))}
+
+        <div className="bg-gray-800 p-6 rounded-lg">
+          <h2 className="text-xl font-semibold mb-4">Videos</h2>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-700">
+                  <th className="text-left py-2 px-4">Title</th>
+                  <th className="text-left py-2 px-4">Status</th>
+                  <th className="text-left py-2 px-4">Clips</th>
+                  <th className="text-left py-2 px-4">Duration</th>
+                  <th className="text-left py-2 px-4">Created</th>
+                  <th className="text-left py-2 px-4">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {
+                  videos.map((video) => (
+                    <tr key={video.id} className="border-b border-gray-700">
+                      <td className="py-3 px-4">{video.title}</td>
+                      <td className="py-3 px-4">
+                        <span className={`px-2 py-1 rounded text-xs ${
+                          video.status === 'completed' ? 'bg-green-600' :
+                          video.status === 'processing' ? 'bg-blue-600' :
+                          video.status === 'failed' ? 'bg-red-600' :
+                          'bg-gray-600'
+                        }`}>
+                          {video.status}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">{video._count.clips}</td>
+                      <td className="py-3 px-4">{Math.floor(video.durationSec / 60)}m</td>
+                      <td className="py-3 px-4">
+                        {new Date(video.createdAt).toLocaleDateString()}
+                      </td>
+                      <td className="py-3 px-4">
+                        <Link
+                          href={`/videos/${video.id}`}
+                          className="text-blue-400 hover:text-blue-300"
+                        >
+                          View
+                        </Link>
+                      </td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+            {
+              videos.length === 0 && (
+                <div className="text-center py-8 text-gray-400">
+                  No videos yet. Submit a YouTube URL to get started.
+                </div>
+              )
+            }
+          </div>
         </div>
       </div>
     </div>
-  );
+  )
 }

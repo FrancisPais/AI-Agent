@@ -1,0 +1,121 @@
+import { spawn } from 'child_process'
+import { promisify } from 'util'
+import { exec } from 'child_process'
+import { existsSync, writeFileSync, mkdirSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
+
+const execPromise = promisify(exec)
+
+function getCookiesPath(): string | null {
+  if (process.env.YOUTUBE_COOKIES)
+  {
+    const cookiesDir = join(tmpdir(), 'yt-cookies')
+    
+    if (!existsSync(cookiesDir))
+    {
+      mkdirSync(cookiesDir, { recursive: true })
+    }
+    
+    const cookiesPath = join(cookiesDir, 'cookies.txt')
+    writeFileSync(cookiesPath, process.env.YOUTUBE_COOKIES)
+    return cookiesPath
+  }
+  return null
+}
+
+async function findYtDlp(): Promise<string> {
+  if (process.env.YT_DLP_PATH && existsSync(process.env.YT_DLP_PATH))
+  {
+    return process.env.YT_DLP_PATH
+  }
+  
+  try {
+    await execPromise('which yt-dlp')
+    return 'yt-dlp'
+  }
+  catch {
+    try {
+      await execPromise('which youtube-dl')
+      return 'youtube-dl'
+    }
+    catch {
+      throw new Error('yt-dlp or youtube-dl not found in PATH')
+    }
+  }
+}
+
+export interface VideoMetadata {
+  title: string
+  duration: number
+  url: string
+}
+
+export async function getVideoMetadata(url: string): Promise<VideoMetadata> {
+  const ytDlp = await findYtDlp()
+  const cookiesPath = getCookiesPath()
+  
+  let cmd = `${ytDlp} --dump-json --no-download --extractor-args "youtube:player_client=mweb;player_skip=configs" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"`
+  
+  if (cookiesPath)
+  {
+    cmd += ` --cookies "${cookiesPath}"`
+  }
+  
+  cmd += ` "${url}"`
+  
+  const { stdout } = await execPromise(cmd)
+  const data = JSON.parse(stdout)
+  
+  return {
+    title: data.title,
+    duration: Math.floor(data.duration),
+    url: data.url
+  }
+}
+
+export async function downloadVideo(url: string, outputPath: string): Promise<void> {
+  const ytDlp = await findYtDlp()
+  const cookiesPath = getCookiesPath()
+  
+  return new Promise((resolve, reject) => {
+    let errorOutput = ''
+    
+    const args = [
+      '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+      '--merge-output-format', 'mp4',
+      '--extractor-args', 'youtube:player_client=mweb;player_skip=configs',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    ]
+    
+    if (cookiesPath)
+    {
+      args.push('--cookies', cookiesPath)
+    }
+    
+    args.push('-o', outputPath, url)
+    
+    const process = spawn(ytDlp, args)
+    
+    process.stderr.on('data', (data) => {
+      errorOutput += data.toString()
+    })
+    
+    process.stdout.on('data', (data) => {
+      console.log(data.toString())
+    })
+    
+    process.on('close', (code) => {
+      if (code === 0)
+      {
+        resolve()
+      }
+      else
+      {
+        reject(new Error(`yt-dlp exited with code ${code}: ${errorOutput}`))
+      }
+    })
+    
+    process.on('error', reject)
+  })
+}

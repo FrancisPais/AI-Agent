@@ -1,13 +1,22 @@
+import type { Metadata } from 'next'
+import { Inter } from 'next/font/google'
+import './globals.css'
+
+const inter = Inter({ subsets: ['latin'] })
+
+export const metadata: Metadata = {
+  title: 'YT Shortsmith',
+  description: 'AI-powered short-form video clip generator',
+}
+
 export default function RootLayout({
   children,
 }: {
-  children: React.ReactNode;
+  children: React.ReactNode
 }) {
   return (
     <html lang="en">
-      <body className="min-h-screen bg-neutral-950 text-white">
-        <div className="max-w-3xl mx-auto p-6">{children}</div>
-      </body>
+      <body className={inter.className}>{children}</body>
     </html>
-  );
+  )
 }

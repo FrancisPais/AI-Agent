@@ -2,8 +2,8 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "module": "commonjs",
-    "moduleResolution": "node",
-    "noEmit": true
+    "noEmit": false,
+    "outDir": "dist"
   },
-  "include": ["worker/**/*.ts", "lib/**/*.ts"]
+  "include": ["src/**/*"]
 }
