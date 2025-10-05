@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 
 interface Video {
   id: string
@@ -20,10 +21,33 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [videos, setVideos] = useState<Video[]>([])
   const [error, setError] = useState('')
+  const [authStatus, setAuthStatus] = useState<any>(null)
+  const router = useRouter()
 
   useEffect(() => {
-    fetchVideos()
+    checkAuth()
   }, [])
+
+  async function checkAuth() {
+    try {
+      const res = await fetch('/api/auth/status')
+      const data = await res.json()
+      setAuthStatus(data)
+      
+      if (!data.isAuthenticated || !data.youtubeConnected)
+      {
+        router.push('/login')
+      }
+      else
+      {
+        fetchVideos()
+      }
+    }
+    catch (err) {
+      console.error('Failed to check auth:', err)
+      router.push('/login')
+    }
+  }
 
   async function fetchVideos() {
     try {
@@ -71,10 +95,43 @@ export default function Home() {
     }
   }
 
+  async function handleLogout() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+      router.push('/login')
+    }
+    catch (err) {
+      console.error('Failed to logout:', err)
+    }
+  }
+
+  if (!authStatus)
+  {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-gray-400">Loading...</div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-4xl font-bold mb-8">YT Shortsmith</h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-4xl font-bold">YT Shortsmith</h1>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+              <span className="text-sm text-gray-400">YouTube Connected</span>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+            >
+              Logout
+            </button>
+          </div>
+        </div>
         
         <div className="bg-gray-800 p-6 rounded-lg mb-8">
           <h2 className="text-xl font-semibold mb-4">Submit YouTube Video</h2>
