@@ -95,12 +95,17 @@ Code style constraints:
 - ffmpeg-static provides bundled ffmpeg binary
 - yt-dlp (or youtube-dl fallback) for downloading YouTube videos
 - Configurable via YT_DLP_PATH environment variable
+- High-quality encoding: CRF 18, preset medium, H.264 high profile level 4.2
+- Audio chunking: Automatically splits files >20MB into 10-minute segments for Whisper API
 
 **Object Storage** (S3-compatible):
-- AWS SDK v3 (@aws-sdk/client-s3)
+- AWS SDK v3 (@aws-sdk/client-s3, @aws-sdk/s3-request-presigner)
 - Supports AWS S3, Cloudflare R2, or any S3-compatible service
 - Stores rendered clips, thumbnails, and SRT subtitle files
+- Uses pre-signed URLs (2-hour expiration) for secure, time-limited access
+- Uploads use ContentDisposition: inline for browser streaming
 - Configuration via S3_ENDPOINT, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET
+- CORS must be configured on bucket to allow GET/HEAD from Replit domains
 
 **Required Environment Variables**:
 ```
