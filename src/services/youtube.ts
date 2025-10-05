@@ -55,23 +55,37 @@ export async function getVideoMetadata(url: string): Promise<VideoMetadata> {
   const ytDlp = await findYtDlp()
   const cookiesPath = getCookiesPath()
   
-  let cmd = `${ytDlp} --dump-json --no-download --extractor-args "youtube:player_client=mweb;player_skip=configs" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"`
+  const playerClients = ['ios', 'android', 'web']
+  let lastError: Error | null = null
   
-  if (cookiesPath)
+  for (const client of playerClients)
   {
-    cmd += ` --cookies "${cookiesPath}"`
+    try {
+      let cmd = `${ytDlp} --dump-json --no-download --extractor-args "youtube:player_client=${client}"`
+      
+      if (cookiesPath)
+      {
+        cmd += ` --cookies "${cookiesPath}"`
+      }
+      
+      cmd += ` "${url}"`
+      
+      const { stdout } = await execPromise(cmd)
+      const data = JSON.parse(stdout)
+      
+      return {
+        title: data.title,
+        duration: Math.floor(data.duration),
+        url: data.url
+      }
+    }
+    catch (error: any) {
+      lastError = error
+      continue
+    }
   }
   
-  cmd += ` "${url}"`
-  
-  const { stdout } = await execPromise(cmd)
-  const data = JSON.parse(stdout)
-  
-  return {
-    title: data.title,
-    duration: Math.floor(data.duration),
-    url: data.url
-  }
+  throw lastError || new Error('Failed to fetch video metadata')
 }
 
 export async function downloadVideo(url: string, outputPath: string): Promise<void> {
@@ -84,8 +98,7 @@ export async function downloadVideo(url: string, outputPath: string): Promise<vo
     const args = [
       '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
       '--merge-output-format', 'mp4',
-      '--extractor-args', 'youtube:player_client=mweb;player_skip=configs',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      '--extractor-args', 'youtube:player_client=ios'
     ]
     
     if (cookiesPath)
