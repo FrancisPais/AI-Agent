@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/src/lib/prisma'
+import { requireAuth } from '@/src/lib/session'
 
 export async function GET(request: NextRequest) {
   try {
+    await requireAuth()
+    
     const searchParams = request.nextUrl.searchParams
     const q = searchParams.get('q') || ''
-    const page = parseInt(searchParams.get('page') || '1')
-    const pageSize = parseInt(searchParams.get('pageSize') || '20')
+    const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
+    const pageSize = Math.min(100, Math.max(1, parseInt(searchParams.get('pageSize') || '20')))
     const sort = searchParams.get('sort') || 'createdAt'
     
     const where = q ? {
@@ -41,8 +44,16 @@ export async function GET(request: NextRequest) {
       totalPages: Math.ceil(total / pageSize)
     })
   }
-  catch (error) {
+  catch (error: any) {
     console.error('Error fetching videos:', error)
+    
+    if (error.message === 'Authentication required')
+    {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      )
+    }
     
     return NextResponse.json(
       { error: 'Failed to fetch videos' },

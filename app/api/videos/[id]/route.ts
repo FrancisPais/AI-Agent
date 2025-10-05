@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/src/lib/prisma'
 import { getS3Url } from '@/src/services/s3'
+import { requireAuth } from '@/src/lib/session'
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
+    await requireAuth()
+    
     const video = await prisma.video.findUnique({
       where: { id: params.id },
       include: {
@@ -36,8 +39,16 @@ export async function GET(
       clips: clipsWithUrls
     })
   }
-  catch (error) {
+  catch (error: any) {
     console.error('Error fetching video:', error)
+    
+    if (error.message === 'Authentication required')
+    {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      )
+    }
     
     return NextResponse.json(
       { error: 'Failed to fetch video' },

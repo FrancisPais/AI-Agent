@@ -2,9 +2,24 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/src/lib/prisma'
 import { videoQueue } from '@/src/lib/queue'
 import { getVideoMetadata } from '@/src/services/youtube'
+import { requireAuth } from '@/src/lib/session'
+
+function sanitizeUrl(url: string): string {
+  const trimmed = url.trim()
+  const urlPattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/i
+  
+  if (!urlPattern.test(trimmed))
+  {
+    throw new Error('Invalid YouTube URL')
+  }
+  
+  return trimmed
+}
 
 export async function POST(request: NextRequest) {
   try {
+    await requireAuth()
+    
     const body = await request.json()
     const { url } = body
     
@@ -16,11 +31,13 @@ export async function POST(request: NextRequest) {
       )
     }
     
-    const metadata = await getVideoMetadata(url)
+    const sanitizedUrl = sanitizeUrl(url)
+    
+    const metadata = await getVideoMetadata(sanitizedUrl)
     
     const video = await prisma.video.create({
       data: {
-        sourceUrl: url,
+        sourceUrl: sanitizedUrl,
         title: metadata.title,
         durationSec: metadata.duration,
         status: 'queued'
@@ -36,8 +53,24 @@ export async function POST(request: NextRequest) {
       status: 'queued'
     })
   }
-  catch (error) {
+  catch (error: any) {
     console.error('Error submitting video:', error)
+    
+    if (error.message === 'Authentication required')
+    {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      )
+    }
+    
+    if (error.message === 'Invalid YouTube URL')
+    {
+      return NextResponse.json(
+        { error: 'Invalid YouTube URL' },
+        { status: 400 }
+      )
+    }
     
     return NextResponse.json(
       { error: 'Failed to submit video' },
