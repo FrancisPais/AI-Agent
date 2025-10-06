@@ -11,6 +11,11 @@ YT Shortsmith is an AI-powered service that automatically generates short-form v
 - Increased MAX_FILE_SIZE from 20MB to 25MB (OpenAI Whisper API's actual limit) to reduce unnecessary chunking
 - Implemented dual audio workflow: compressed mono 16kHz 64kbps MP3 for transcription to reduce file sizes and API costs (~70% reduction), while preserving original high-quality audio for final clip rendering
 - Audio chunking now significantly reduced due to compression and increased file size limit
+- **Pipeline Improvements**:
+  - Dynamic audio chunking by file size: 48MB audio now splits into ~2 chunks (not 11) based on ~24.5MB target
+  - Podcast intro skip: configurable via INTRO_SKIP_SECONDS (default 180s), skips first N seconds in both transcription and clip selection
+  - Fault-tolerant processing: uses Promise.allSettled for chunks and clips, retries transient OpenAI errors with exponential backoff
+  - Job summaries: detailed logging of successful/failed clips with error reporting
 
 ## User Preferences
 
@@ -150,6 +155,9 @@ GOOGLE_CLIENT_ID (for OAuth 2.0)
 GOOGLE_CLIENT_SECRET (for OAuth 2.0)
 GOOGLE_REDIRECT_URI (optional, auto-detected from REPLIT_DOMAINS)
 YT_DLP_PATH (optional, defaults to system PATH)
+OPENAI_CHUNK_TARGET_MB (optional, default 24.5 - target chunk size in MB)
+OPENAI_MAX_RETRIES (optional, default 2 - max retries for transient errors)
+INTRO_SKIP_SECONDS (optional, default 180 - seconds to skip at start of videos)
 ```
 
 **Deployment Considerations**:
