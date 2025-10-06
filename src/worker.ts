@@ -53,7 +53,7 @@ async function processVideo(job: Job<VideoJob>) {
   
   try {
     const videoPath = join(workDir, 'source.mp4')
-    const audioPath = join(workDir, 'audio.mp3')
+    const audioPath = join(workDir, 'audio.m4a')
     
     console.log(`Downloading video: ${video.sourceUrl}`)
     await downloadVideo(video.sourceUrl, videoPath, userId)

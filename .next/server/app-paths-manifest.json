@@ -1,10 +1,11 @@
 {
-  "/setup-cookies/page": "app/setup-cookies/page.js",
   "/page": "app/page.js",
-  "/videos/[id]/page": "app/videos/[id]/page.js",
   "/login/page": "app/login/page.js",
+  "/videos/[id]/page": "app/videos/[id]/page.js",
+  "/api/auth/google/start/route": "app/api/auth/google/start/route.js",
   "/api/auth/status/route": "app/api/auth/status/route.js",
+  "/api/auth/google/callback/route": "app/api/auth/google/callback/route.js",
   "/api/me/connections/route": "app/api/me/connections/route.js",
   "/api/videos/route": "app/api/videos/route.js",
-  "/api/submit/route": "app/api/submit/route.js"
+  "/api/videos/[id]/route": "app/api/videos/[id]/route.js"
 }

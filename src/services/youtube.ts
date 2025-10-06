@@ -202,9 +202,8 @@ export async function downloadVideo(url: string, outputPath: string, userId: str
           }
           
           const args = [
-            '-f', 'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=1080]+bestaudio/bestvideo[height>=720]+bestaudio/best',
+            '-f', "bv*[height<=1080][fps<=60][vcodec~='(avc1|h264)']+ba[acodec~='(m4a|aac)']/b[ext=mp4]",
             '--merge-output-format', 'mp4',
-            '--format-sort', 'res:1080,codec:h264,br',
             '--force-ipv4',
             '--sleep-requests', '1',
             '--min-sleep-interval', '1',

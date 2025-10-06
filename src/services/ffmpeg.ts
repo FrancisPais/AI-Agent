@@ -50,11 +50,7 @@ export async function extractAudio(videoPath: string, outputPath: string): Promi
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
       .output(outputPath)
-      .audioCodec('libmp3lame')
-      .audioBitrate('64k')
-      .audioChannels(1)
-      .audioFrequency(16000)
-      .noVideo()
+      .outputOptions(['-vn', '-c:a', 'copy'])
       .on('end', () => resolve())
       .on('error', reject)
       .run()
@@ -84,7 +80,7 @@ export async function splitAudioIntoChunks(audioPath: string, chunkDurationSecon
         ffmpeg(audioPath)
           .setStartTime(startTime)
           .duration(chunkDurationSeconds)
-          .audioCodec('libmp3lame')
+          .outputOptions(['-c:a', 'copy'])
           .output(chunkPath)
           .on('end', () => resolve())
           .on('error', reject)
@@ -119,21 +115,17 @@ export async function renderVerticalClip(options: RenderOptions): Promise<void> 
     ffmpeg(inputPath)
       .setStartTime(startTime)
       .duration(duration)
-      .size('1080x1920')
-      .fps(30)
       .videoCodec('libx264')
       .outputOptions([
         '-preset', 'medium',
-        '-crf', '18',
-        '-profile:v', 'high',
-        '-level', '4.2',
+        '-crf', '20',
         '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart',
-        '-vf', `scale=-1:1920:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.3,subtitles=${escapedSrtPath}:force_style='Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=3,Outline=2,Shadow=0,MarginV=80',drawtext=text='${escapedHookText}':fontsize=32:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=72`,
-        '-af', 'loudnorm=I=-14:LRA=11:TP=-1.5'
+        '-vf', `crop=ih*9/16:ih,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p,subtitles=${escapedSrtPath}:force_style='Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=3,Outline=2,Shadow=0,MarginV=80',drawtext=text='${escapedHookText}':fontsize=32:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=72`,
+        '-movflags', '+faststart'
       ])
       .audioCodec('aac')
       .audioBitrate('192k')
+      .audioFrequency(44100)
       .output(outputPath)
       .on('end', () => resolve())
       .on('error', reject)
