@@ -1,9 +1,5 @@
 {
   "/page": "app/page.js",
-  "/setup-cookies/page": "app/setup-cookies/page.js",
-  "/api/youtube/cookies/route": "app/api/youtube/cookies/route.js",
-  "/api/auth/logout/route": "app/api/auth/logout/route.js",
-  "/login/page": "app/login/page.js",
   "/api/auth/status/route": "app/api/auth/status/route.js",
-  "/api/auth/google/start/route": "app/api/auth/google/start/route.js"
+  "/login/page": "app/login/page.js"
 }

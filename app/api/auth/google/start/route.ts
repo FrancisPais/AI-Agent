@@ -4,7 +4,22 @@ import { OAuth2Client } from 'google-auth-library'
 const getOAuthClient = () => {
   const clientId = process.env.GOOGLE_CLIENT_ID
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET
-  const redirectUri = process.env.GOOGLE_REDIRECT_URI || `${process.env.REPLIT_DOMAINS?.split(',')[0] || 'http://localhost:5000'}/api/auth/google/callback`
+  
+  let redirectUri = process.env.GOOGLE_REDIRECT_URI
+  
+  if (!redirectUri)
+  {
+    const replitDomain = process.env.REPLIT_DOMAINS?.split(',')[0]
+    
+    if (replitDomain)
+    {
+      redirectUri = `https://${replitDomain}/api/auth/google/callback`
+    }
+    else
+    {
+      redirectUri = 'http://localhost:5000/api/auth/google/callback'
+    }
+  }
   
   if (!clientId || !clientSecret)
   {
