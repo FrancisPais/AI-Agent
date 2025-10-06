@@ -25,6 +25,40 @@ export interface TranscriptSegment {
 
 const TARGET_MB = parseFloat(process.env.OPENAI_CHUNK_TARGET_MB || '24.5')
 const TARGET_BYTES = Math.floor(TARGET_MB * 1024 * 1024)
+const MAX_RETRIES = parseInt(process.env.OPENAI_MAX_RETRIES || '2', 10)
+
+export async function withRetries<T>(fn: () => Promise<T>): Promise<T> {
+  let attempt = 0
+  let delay = 1000
+  
+  for (;;)
+  {
+    try {
+      const res = await fn()
+      return res
+    }
+    catch (err: any) {
+      attempt = attempt + 1
+      const code = err?.status || err?.code || 0
+      const transient = code === 429 || code === 408 || code === 500 || code === 502 || code === 503 || code === 504
+      
+      if (attempt > MAX_RETRIES)
+      {
+        throw err
+      }
+      
+      if (!transient)
+      {
+        throw err
+      }
+      
+      await new Promise(r => {
+        setTimeout(r, delay)
+      })
+      delay = delay * 2
+    }
+  }
+}
 
 export async function planAudioChunksBySize(inputPath: string, durationSec: number): Promise<{ start: number; duration: number }[]> {
   const sizeBytes = getFileSizeBytes(inputPath)
@@ -242,16 +276,17 @@ export interface ScoreResult {
 }
 
 export async function scoreClip(title: string, hook: string, transcript: string): Promise<ScoreResult> {
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      {
-        role: 'system',
-        content: 'You score short-form video clips for viral potential.'
-      },
-      {
-        role: 'user',
-        content: `Given the transcript segment, the first-3-second hook text, and context title, return a JSON object with:
+  return withRetries(async () => {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: 'You score short-form video clips for viral potential.'
+        },
+        {
+          role: 'user',
+          content: `Given the transcript segment, the first-3-second hook text, and context title, return a JSON object with:
 category in [Education, Motivation, Humor, Commentary, Tech, Lifestyle, News, Finance, Health, Sports, Gaming, Other]
 tags as an array of 3–7 short tags
 scores as integers: hook_strength 0–10, retention_likelihood 0–10, clarity 0–10, shareability 0–10, overall 0–100
@@ -264,12 +299,13 @@ hook: ${hook}
 transcript: ${transcript}
 
 JSON only.`
-      }
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.7
+        }
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.7
+    })
+    
+    const content = response.choices[0].message.content || '{}'
+    return JSON.parse(content) as ScoreResult
   })
-  
-  const content = response.choices[0].message.content || '{}'
-  return JSON.parse(content) as ScoreResult
 }
