@@ -2,7 +2,7 @@ import ffmpeg from 'fluent-ffmpeg'
 import ffmpegStatic from 'ffmpeg-static'
 import { promisify } from 'util'
 import { exec } from 'child_process'
-import { writeFileSync, readFileSync } from 'fs'
+import { writeFileSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 
 const execPromise = promisify(exec)
@@ -10,6 +10,22 @@ const execPromise = promisify(exec)
 if (ffmpegStatic)
 {
   ffmpeg.setFfmpegPath(ffmpegStatic)
+}
+
+export function getFileSizeBytes(path: string): number {
+  const stat = statSync(path)
+  return stat.size
+}
+
+export async function getDurationSeconds(inputPath: string): Promise<number> {
+  const ffmpegPath = ffmpegStatic || 'ffmpeg'
+  const getDurationCmd = `${ffmpegPath} -i "${inputPath}" 2>&1 | grep "Duration" | cut -d ' ' -f 4 | sed s/,//`
+  
+  const { stdout: durationStr } = await execPromise(getDurationCmd)
+  const [hours, minutes, seconds] = durationStr.trim().split(':').map(parseFloat)
+  const totalDuration = hours * 3600 + minutes * 60 + seconds
+  
+  return totalDuration
 }
 
 export interface SceneChange {
