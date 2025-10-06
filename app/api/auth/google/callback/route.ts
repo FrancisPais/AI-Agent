@@ -112,6 +112,10 @@ export async function GET(request: NextRequest) {
   }
   catch (error: any) {
     console.error('Error in Google OAuth callback:', error)
-    return NextResponse.redirect(new URL('/login?error=callback_failed', request.url))
+    
+    const replitDomain = process.env.REPLIT_DOMAINS?.split(',')[0]
+    const baseUrl = replitDomain ? `https://${replitDomain}` : request.url
+    
+    return NextResponse.redirect(new URL('/login?error=callback_failed', baseUrl))
   }
 }
