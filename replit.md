@@ -4,6 +4,14 @@
 
 YT Shortsmith is an AI-powered service that automatically generates short-form video clips from YouTube videos. It accepts a YouTube URL, downloads the source video, transcribes the audio, detects optimal segments for short-form content (20-60 seconds), converts them to 9:16 vertical format, adds subtitles, and scores each clip using AI criteria. The system is designed for creating engaging social media shorts optimized for platforms like TikTok, Instagram Reels, and YouTube Shorts.
 
+## Recent Changes
+
+**October 6, 2025**
+- Fixed ffmpeg hook text escaping to properly handle apostrophes, brackets, colons, and backslashes in drawtext filter
+- Increased MAX_FILE_SIZE from 20MB to 25MB (OpenAI Whisper API's actual limit) to reduce unnecessary chunking
+- Implemented dual audio workflow: compressed mono 16kHz 64kbps MP3 for transcription to reduce file sizes and API costs (~70% reduction), while preserving original high-quality audio for final clip rendering
+- Audio chunking now significantly reduced due to compression and increased file size limit
+
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
@@ -74,7 +82,7 @@ Code style constraints:
 **Processing Pipeline**:
 1. User submits YouTube URL → API creates video record → Job enqueued
 2. Worker picks up job → Downloads video with yt-dlp → Saves to temp directory
-3. Extract audio → Transcribe with Whisper API (word-level timestamps)
+3. Extract audio (stream copy for preservation) → Compress to mono 16kHz 64kbps MP3 for transcription → Transcribe with Whisper API (word-level timestamps)
 4. Detect segments using:
    - Voice activity and pause gaps (0.35-0.9s gaps between words)
    - Scene changes from ffmpeg (threshold > 0.3)
