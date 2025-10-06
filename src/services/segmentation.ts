@@ -12,6 +12,7 @@ export interface Segment {
 }
 
 export function detectSegments(transcript: TranscriptSegment[], sceneChanges: SceneChange[]): Segment[] {
+  const introSkip = parseInt(process.env.INTRO_SKIP_SECONDS || '180', 10)
   const allWords: TranscriptWord[] = []
   
   for (const segment of transcript)
@@ -120,14 +121,16 @@ export function detectSegments(transcript: TranscriptSegment[], sceneChanges: Sc
     }
   }
   
-  candidates.sort((a, b) => b.score - a.score)
+  const usableCandidates = candidates.filter(c => c.startSec >= introSkip)
   
-  const preferredCandidates = candidates.filter(c => c.durationSec >= 25 && c.durationSec <= 45)
+  usableCandidates.sort((a, b) => b.score - a.score)
+  
+  const preferredCandidates = usableCandidates.filter(c => c.durationSec >= 25 && c.durationSec <= 45)
   
   if (preferredCandidates.length > 0)
   {
     return preferredCandidates.slice(0, 12)
   }
   
-  return candidates.slice(0, 12)
+  return usableCandidates.slice(0, 12)
 }

@@ -119,20 +119,34 @@ async function transcribeAudioFile(audioPath: string, timeOffset: number = 0, re
 export async function transcribeAudio(audioPath: string): Promise<TranscriptSegment[]> {
   const fileSize = getFileSizeBytes(audioPath)
   const duration = await getDurationSeconds(audioPath)
+  const introSkip = parseInt(process.env.INTRO_SKIP_SECONDS || '180', 10)
+  
+  let effectiveStart = 0
+  
+  if (duration > introSkip)
+  {
+    effectiveStart = introSkip
+    console.log(`Skipping first ${introSkip}s of audio (intro skip)`)
+  }
+  
+  const effectiveDuration = duration - effectiveStart
   let allWords: TranscriptWord[] = []
   
   if (fileSize > TARGET_BYTES)
   {
     console.log(`Audio file is ${(fileSize / 1024 / 1024).toFixed(1)}MB, splitting into chunks...`)
-    const chunkPlan = await planAudioChunksBySize(audioPath, duration)
+    const planned = await planAudioChunksBySize(audioPath, effectiveDuration)
+    const shifted = planned.map((p) => {
+      return { start: p.start + effectiveStart, duration: p.duration }
+    })
     
-    console.log(`Transcribing ${chunkPlan.length} chunks in parallel (max 3 concurrent)...`)
+    console.log(`Transcribing ${shifted.length} chunks in parallel (max 3 concurrent)...`)
     
     const audioDir = audioPath.substring(0, audioPath.lastIndexOf('/'))
     const audioExt = audioPath.substring(audioPath.lastIndexOf('.'))
     
     const transcribeChunk = async (plan: { start: number; duration: number }, index: number) => {
-      console.log(`Transcribing chunk ${index + 1}/${chunkPlan.length}`)
+      console.log(`Transcribing chunk ${index + 1}/${shifted.length}`)
       const chunkPath = join(audioDir, `chunk_${index}${audioExt}`)
       await extractAudioChunk(audioPath, chunkPath, plan.start, plan.duration)
       return await transcribeAudioFile(chunkPath, plan.start)
@@ -140,9 +154,9 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptSegm
     
     const chunkResults: TranscriptWord[][] = []
     
-    for (let i = 0; i < chunkPlan.length; i += 3)
+    for (let i = 0; i < shifted.length; i += 3)
     {
-      const batch = chunkPlan.slice(i, i + 3)
+      const batch = shifted.slice(i, i + 3)
       const batchResults = await Promise.all(
         batch.map((plan, idx) => transcribeChunk(plan, i + idx))
       )
@@ -152,7 +166,17 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptSegm
     allWords = chunkResults.flat()
   }
   else {
-    allWords = await transcribeAudioFile(audioPath)
+    if (effectiveStart > 0)
+    {
+      const audioDir = audioPath.substring(0, audioPath.lastIndexOf('/'))
+      const audioExt = audioPath.substring(audioPath.lastIndexOf('.'))
+      const skippedPath = join(audioDir, `skipped${audioExt}`)
+      await extractAudioChunk(audioPath, skippedPath, effectiveStart, effectiveDuration)
+      allWords = await transcribeAudioFile(skippedPath, effectiveStart)
+    }
+    else {
+      allWords = await transcribeAudioFile(audioPath)
+    }
   }
 
   const segments: TranscriptSegment[] = []
