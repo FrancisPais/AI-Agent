@@ -2,7 +2,7 @@ import { Worker, Job } from 'bullmq'
 import { connection } from './lib/queue'
 import { prisma } from './lib/prisma'
 import { getVideoMetadata, downloadVideo, cleanupUserCookiesFile } from './services/youtube'
-import { extractAudio, renderVerticalClip, extractThumbnail, createSrtFile, detectScenes } from './services/ffmpeg'
+import { extractAudio, compressAudioForTranscription, renderVerticalClip, extractThumbnail, createSrtFile, detectScenes } from './services/ffmpeg'
 import { transcribeAudio } from './services/openai'
 import { scoreClip } from './services/openai'
 import { detectSegments } from './services/segmentation'
@@ -54,6 +54,7 @@ async function processVideo(job: Job<VideoJob>) {
   try {
     const videoPath = join(workDir, 'source.mp4')
     const audioPath = join(workDir, 'audio.m4a')
+    const transcriptionAudioPath = join(workDir, 'audio_transcription.mp3')
     
     console.log(`Downloading video: ${video.sourceUrl}`)
     await downloadVideo(video.sourceUrl, videoPath, userId)
@@ -61,8 +62,11 @@ async function processVideo(job: Job<VideoJob>) {
     console.log(`Extracting audio`)
     await extractAudio(videoPath, audioPath)
     
+    console.log(`Compressing audio for transcription`)
+    await compressAudioForTranscription(audioPath, transcriptionAudioPath)
+    
     console.log(`Transcribing audio`)
-    const transcript = await transcribeAudio(audioPath)
+    const transcript = await transcribeAudio(transcriptionAudioPath)
     
     await prisma.video.update({
       where: { id: videoId },

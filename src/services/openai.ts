@@ -21,7 +21,7 @@ export interface TranscriptSegment {
   words: TranscriptWord[]
 }
 
-const MAX_FILE_SIZE = 20 * 1024 * 1024
+const MAX_FILE_SIZE = 25 * 1024 * 1024
 
 async function transcribeAudioFile(audioPath: string, timeOffset: number = 0, retries = 5): Promise<TranscriptWord[]> {
   let lastError: Error | null = null

@@ -57,6 +57,23 @@ export async function extractAudio(videoPath: string, outputPath: string): Promi
   })
 }
 
+export async function compressAudioForTranscription(inputPath: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .output(outputPath)
+      .outputOptions([
+        '-vn',
+        '-c:a', 'libmp3lame',
+        '-b:a', '64k',
+        '-ac', '1',
+        '-ar', '16000'
+      ])
+      .on('end', () => resolve())
+      .on('error', reject)
+      .run()
+  })
+}
+
 export async function splitAudioIntoChunks(audioPath: string, chunkDurationSeconds: number): Promise<string[]> {
   const chunks: string[] = []
   const audioDir = audioPath.substring(0, audioPath.lastIndexOf('/'))
@@ -109,7 +126,12 @@ export async function renderVerticalClip(options: RenderOptions): Promise<void> 
   const { inputPath, outputPath, startTime, duration, srtPath, hookText } = options
   
   const escapedSrtPath = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:')
-  const escapedHookText = hookText.replace(/'/g, "'\\''").replace(/:/g, '\\:')
+  const escapedHookText = hookText
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/:/g, '\\:')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
   
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
