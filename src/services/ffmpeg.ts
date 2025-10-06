@@ -51,6 +51,9 @@ export async function extractAudio(videoPath: string, outputPath: string): Promi
     ffmpeg(videoPath)
       .output(outputPath)
       .audioCodec('libmp3lame')
+      .audioBitrate('64k')
+      .audioChannels(1)
+      .audioFrequency(16000)
       .noVideo()
       .on('end', () => resolve())
       .on('error', reject)
@@ -126,7 +129,7 @@ export async function renderVerticalClip(options: RenderOptions): Promise<void> 
         '-level', '4.2',
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
-        '-vf', `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=${escapedSrtPath}:force_style='Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=3,Outline=2,Shadow=0,MarginV=80',drawtext=text='${escapedHookText}':fontsize=32:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=72`,
+        '-vf', `scale=-1:1920:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.3,subtitles=${escapedSrtPath}:force_style='Fontsize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=3,Outline=2,Shadow=0,MarginV=80',drawtext=text='${escapedHookText}':fontsize=32:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=72`,
         '-af', 'loudnorm=I=-14:LRA=11:TP=-1.5'
       ])
       .audioCodec('aac')

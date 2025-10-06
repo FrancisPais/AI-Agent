@@ -78,10 +78,7 @@ async function processVideo(job: Job<VideoJob>) {
     
     console.log(`Found ${segments.length} candidate segments`)
     
-    for (let i = 0; i < segments.length; i++)
-    {
-      const segment = segments[i]
-      
+    const processSegment = async (segment: any, i: number) => {
       console.log(`Processing segment ${i + 1}/${segments.length}`)
       
       const clipId = `${videoId}_${i}`
@@ -107,19 +104,20 @@ async function processVideo(job: Job<VideoJob>) {
         hookText: segment.hook
       })
       
-      await extractThumbnail(clipPath, thumbPath, 1)
-      
-      console.log(`Scoring segment ${i + 1}`)
-      const scores = await scoreClip(video.title, segment.hook, segment.text)
+      const [_, scores] = await Promise.all([
+        extractThumbnail(clipPath, thumbPath, 1),
+        scoreClip(video.title, segment.hook, segment.text)
+      ])
       
       const s3VideoKey = `videos/${videoId}/clips/${clipId}/clip.mp4`
       const s3ThumbKey = `videos/${videoId}/clips/${clipId}/thumb.jpg`
       const s3SrtKey = `videos/${videoId}/clips/${clipId}/clip.srt`
       
-      console.log(`Uploading to S3`)
-      await uploadFile(s3VideoKey, clipPath, 'video/mp4')
-      await uploadFile(s3ThumbKey, thumbPath, 'image/jpeg')
-      await uploadFile(s3SrtKey, srtPath, 'text/plain')
+      await Promise.all([
+        uploadFile(s3VideoKey, clipPath, 'video/mp4'),
+        uploadFile(s3ThumbKey, thumbPath, 'image/jpeg'),
+        uploadFile(s3SrtKey, srtPath, 'text/plain')
+      ])
       
       await prisma.clip.create({
         data: {
@@ -143,6 +141,12 @@ async function processVideo(job: Job<VideoJob>) {
       })
       
       console.log(`Segment ${i + 1} completed`)
+    }
+    
+    for (let i = 0; i < segments.length; i += 2)
+    {
+      const batch = segments.slice(i, i + 2)
+      await Promise.all(batch.map((seg, idx) => processSegment(seg, i + idx)))
     }
     
     await prisma.video.update({

@@ -77,11 +77,24 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptSegm
     const chunkDuration = 600
     const chunks = await splitAudioIntoChunks(audioPath, chunkDuration)
     
-    for (let i = 0; i < chunks.length; i++) {
-      console.log(`Transcribing chunk ${i + 1}/${chunks.length}`)
-      const chunkWords = await transcribeAudioFile(chunks[i], i * chunkDuration)
-      allWords = allWords.concat(chunkWords)
+    console.log(`Transcribing ${chunks.length} chunks in parallel (max 3 concurrent)...`)
+    
+    const transcribeChunk = async (chunkPath: string, index: number) => {
+      console.log(`Transcribing chunk ${index + 1}/${chunks.length}`)
+      return await transcribeAudioFile(chunkPath, index * chunkDuration)
     }
+    
+    const chunkResults: TranscriptWord[][] = []
+    for (let i = 0; i < chunks.length; i += 3)
+    {
+      const batch = chunks.slice(i, i + 3)
+      const batchResults = await Promise.all(
+        batch.map((chunk, idx) => transcribeChunk(chunk, i + idx))
+      )
+      chunkResults.push(...batchResults)
+    }
+    
+    allWords = chunkResults.flat()
   } else {
     allWords = await transcribeAudioFile(audioPath)
   }
