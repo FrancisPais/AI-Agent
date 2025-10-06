@@ -108,7 +108,10 @@ export async function GET(request: NextRequest) {
     session.email = user.email
     await session.save()
     
-    return NextResponse.redirect(new URL('/', request.url))
+    const replitDomain = process.env.REPLIT_DOMAINS?.split(',')[0]
+    const baseUrl = replitDomain ? `https://${replitDomain}` : request.url
+    
+    return NextResponse.redirect(new URL('/', baseUrl))
   }
   catch (error: any) {
     console.error('Error in Google OAuth callback:', error)
