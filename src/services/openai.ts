@@ -23,27 +23,49 @@ export interface TranscriptSegment {
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024
 
-async function transcribeAudioFile(audioPath: string, timeOffset: number = 0): Promise<TranscriptWord[]> {
-  const response = await openai.audio.transcriptions.create({
-    file: createReadStream(audioPath),
-    model: 'whisper-1',
-    response_format: 'verbose_json',
-    timestamp_granularities: ['word']
-  })
-
-  const words: TranscriptWord[] = []
+async function transcribeAudioFile(audioPath: string, timeOffset: number = 0, retries = 5): Promise<TranscriptWord[]> {
+  let lastError: Error | null = null
   
-  if (response.words) {
-    for (const word of response.words) {
-      words.push({
-        word: word.word,
-        start: word.start + timeOffset,
-        end: word.end + timeOffset
+  for (let attempt = 1; attempt <= retries; attempt++)
+  {
+    try {
+      const response = await openai.audio.transcriptions.create({
+        file: createReadStream(audioPath),
+        model: 'whisper-1',
+        response_format: 'verbose_json',
+        timestamp_granularities: ['word']
       })
+
+      const words: TranscriptWord[] = []
+      
+      if (response.words) {
+        for (const word of response.words) {
+          words.push({
+            word: word.word,
+            start: word.start + timeOffset,
+            end: word.end + timeOffset
+          })
+        }
+      }
+      
+      return words
+    }
+    catch (error: any) {
+      lastError = error
+      
+      if (error.code === 'ECONNRESET' || error.cause?.code === 'ECONNRESET' || error.status === 500 || error.status === 503)
+      {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30000)
+        console.log(`Transcription attempt ${attempt}/${retries} failed with network error. Retrying in ${delay}ms...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+        continue
+      }
+      
+      throw error
     }
   }
   
-  return words
+  throw lastError || new Error('Failed to transcribe audio after retries')
 }
 
 export async function transcribeAudio(audioPath: string): Promise<TranscriptSegment[]> {
