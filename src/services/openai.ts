@@ -1,6 +1,8 @@
 import OpenAI from 'openai'
 import { createReadStream, statSync } from 'fs'
-import { splitAudioIntoChunks } from './ffmpeg'
+import { getFileSizeBytes, getDurationSeconds } from './ffmpeg'
+import ffmpeg from 'fluent-ffmpeg'
+import { join } from 'path'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -21,7 +23,51 @@ export interface TranscriptSegment {
   words: TranscriptWord[]
 }
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024
+const TARGET_MB = parseFloat(process.env.OPENAI_CHUNK_TARGET_MB || '24.5')
+const TARGET_BYTES = Math.floor(TARGET_MB * 1024 * 1024)
+
+export async function planAudioChunksBySize(inputPath: string, durationSec: number): Promise<{ start: number; duration: number }[]> {
+  const sizeBytes = getFileSizeBytes(inputPath)
+  let chunks = Math.ceil(sizeBytes / TARGET_BYTES)
+  
+  if (chunks < 1)
+  {
+    chunks = 1
+  }
+  
+  const base = Math.floor(durationSec / chunks)
+  const rem = durationSec - base * chunks
+  const plan: { start: number; duration: number }[] = []
+  let cursor = 0
+  
+  for (let i = 0; i < chunks; i++)
+  {
+    let d = base
+    
+    if (i < rem)
+    {
+      d = d + 1
+    }
+    
+    plan.push({ start: cursor, duration: d })
+    cursor = cursor + d
+  }
+  
+  return plan
+}
+
+async function extractAudioChunk(inputPath: string, outputPath: string, start: number, duration: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .setStartTime(start)
+      .duration(duration)
+      .outputOptions(['-c:a', 'copy'])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', reject)
+      .run()
+  })
+}
 
 async function transcribeAudioFile(audioPath: string, timeOffset: number = 0, retries = 5): Promise<TranscriptWord[]> {
   let lastError: Error | null = null
@@ -38,8 +84,10 @@ async function transcribeAudioFile(audioPath: string, timeOffset: number = 0, re
 
       const words: TranscriptWord[] = []
       
-      if (response.words) {
-        for (const word of response.words) {
+      if (response.words)
+      {
+        for (const word of response.words)
+        {
           words.push({
             word: word.word,
             start: word.start + timeOffset,
@@ -69,33 +117,41 @@ async function transcribeAudioFile(audioPath: string, timeOffset: number = 0, re
 }
 
 export async function transcribeAudio(audioPath: string): Promise<TranscriptSegment[]> {
-  const fileSize = statSync(audioPath).size
+  const fileSize = getFileSizeBytes(audioPath)
+  const duration = await getDurationSeconds(audioPath)
   let allWords: TranscriptWord[] = []
   
-  if (fileSize > MAX_FILE_SIZE) {
+  if (fileSize > TARGET_BYTES)
+  {
     console.log(`Audio file is ${(fileSize / 1024 / 1024).toFixed(1)}MB, splitting into chunks...`)
-    const chunkDuration = 600
-    const chunks = await splitAudioIntoChunks(audioPath, chunkDuration)
+    const chunkPlan = await planAudioChunksBySize(audioPath, duration)
     
-    console.log(`Transcribing ${chunks.length} chunks in parallel (max 3 concurrent)...`)
+    console.log(`Transcribing ${chunkPlan.length} chunks in parallel (max 3 concurrent)...`)
     
-    const transcribeChunk = async (chunkPath: string, index: number) => {
-      console.log(`Transcribing chunk ${index + 1}/${chunks.length}`)
-      return await transcribeAudioFile(chunkPath, index * chunkDuration)
+    const audioDir = audioPath.substring(0, audioPath.lastIndexOf('/'))
+    const audioExt = audioPath.substring(audioPath.lastIndexOf('.'))
+    
+    const transcribeChunk = async (plan: { start: number; duration: number }, index: number) => {
+      console.log(`Transcribing chunk ${index + 1}/${chunkPlan.length}`)
+      const chunkPath = join(audioDir, `chunk_${index}${audioExt}`)
+      await extractAudioChunk(audioPath, chunkPath, plan.start, plan.duration)
+      return await transcribeAudioFile(chunkPath, plan.start)
     }
     
     const chunkResults: TranscriptWord[][] = []
-    for (let i = 0; i < chunks.length; i += 3)
+    
+    for (let i = 0; i < chunkPlan.length; i += 3)
     {
-      const batch = chunks.slice(i, i + 3)
+      const batch = chunkPlan.slice(i, i + 3)
       const batchResults = await Promise.all(
-        batch.map((chunk, idx) => transcribeChunk(chunk, i + idx))
+        batch.map((plan, idx) => transcribeChunk(plan, i + idx))
       )
       chunkResults.push(...batchResults)
     }
     
     allWords = chunkResults.flat()
-  } else {
+  }
+  else {
     allWords = await transcribeAudioFile(audioPath)
   }
 
