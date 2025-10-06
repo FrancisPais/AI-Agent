@@ -187,14 +187,34 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptSegm
     }
     
     const chunkResults: TranscriptWord[][] = []
+    const chunkErrors: Array<{ index: number; error: any }> = []
     
     for (let i = 0; i < shifted.length; i += 3)
     {
       const batch = shifted.slice(i, i + 3)
-      const batchResults = await Promise.all(
+      const batchResults = await Promise.allSettled(
         batch.map((plan, idx) => transcribeChunk(plan, i + idx))
       )
-      chunkResults.push(...batchResults)
+      
+      for (let j = 0; j < batchResults.length; j++)
+      {
+        const result = batchResults[j]
+        
+        if (result.status === 'fulfilled')
+        {
+          chunkResults.push(result.value)
+        }
+        else {
+          const chunkIndex = i + j
+          console.error(`Chunk ${chunkIndex + 1} failed to transcribe:`, result.reason)
+          chunkErrors.push({ index: chunkIndex, error: result.reason })
+        }
+      }
+    }
+    
+    if (chunkErrors.length > 0 && chunkResults.length === 0)
+    {
+      throw new Error(`All chunks failed to transcribe. Errors: ${JSON.stringify(chunkErrors)}`)
     }
     
     allWords = chunkResults.flat()

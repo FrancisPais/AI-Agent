@@ -147,18 +147,47 @@ async function processVideo(job: Job<VideoJob>) {
       console.log(`Segment ${i + 1} completed`)
     }
     
+    const clipSuccesses: string[] = []
+    const clipFailures: Array<{ index: number; error: any }> = []
+    
     for (let i = 0; i < segments.length; i += 2)
     {
       const batch = segments.slice(i, i + 2)
-      await Promise.all(batch.map((seg, idx) => processSegment(seg, i + idx)))
+      const results = await Promise.allSettled(
+        batch.map((seg, idx) => processSegment(seg, i + idx))
+      )
+      
+      for (let j = 0; j < results.length; j++)
+      {
+        const result = results[j]
+        const clipIndex = i + j
+        
+        if (result.status === 'fulfilled')
+        {
+          clipSuccesses.push(`clip_${clipIndex}`)
+        }
+        else {
+          console.error(`Clip ${clipIndex + 1} failed:`, result.reason)
+          clipFailures.push({ index: clipIndex, error: result.reason })
+        }
+      }
     }
+    
+    const summary = {
+      totalSegments: segments.length,
+      successfulClips: clipSuccesses.length,
+      failedClips: clipFailures.length,
+      failures: clipFailures.map(f => ({ clip: `clip_${f.index}`, error: f.error?.message || String(f.error) }))
+    }
+    
+    console.log('Processing summary:', JSON.stringify(summary, null, 2))
     
     await prisma.video.update({
       where: { id: videoId },
       data: { status: 'completed' }
     })
     
-    console.log(`Video ${videoId} processing completed`)
+    console.log(`Video ${videoId} processing completed with ${clipSuccesses.length} successful clips and ${clipFailures.length} failures`)
   }
   catch (error) {
     console.error(`Error processing video ${videoId}:`, error)
