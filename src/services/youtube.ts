@@ -206,6 +206,7 @@ export async function downloadVideo(url: string, outputPath: string, userId: str
             '--merge-output-format', 'mp4',
             '--force-ipv4',
             '--sleep-requests', '1',
+            '--min-sleep-interval', '1',
             '--max-sleep-interval', '5',
             '--extractor-args', extractorArgs,
             '--cookies', cookiesPath,
