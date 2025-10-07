@@ -1,0 +1,55 @@
+modules = ["nodejs-20", "web", "python-3.11"]
+[agent]
+expertMode = true
+integrations = ["youtube:1.0.0"]
+
+[nix]
+channel = "stable-25_05"
+packages = ["redis", "yt-dlp"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Next.js Dev Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Worker"
+
+[[workflows.workflow]]
+name = "Next.js Dev Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run dev"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow]]
+name = "Worker"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c \"redis-server --daemonize yes --port 6379 2>/dev/null || true; npm run worker\""
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 6379
+externalPort = 3000
