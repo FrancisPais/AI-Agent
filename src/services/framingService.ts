@@ -1,0 +1,607 @@
+import * as tf from '@tensorflow/tfjs-node'
+import * as faceapi from '@vladmandic/face-api/dist/face-api.node.js'
+import * as path from 'path'
+import * as fs from 'fs'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+
+const execFileAsync = promisify(execFile)
+
+type TranscriptWord = { t: number; end: number; text: string; speaker?: string }
+type SpeakerWindow = { start: number; end: number; speakerId: string }
+type FaceBox = { t: number; x: number; y: number; w: number; h: number; landmarks?: number[][] }
+type BodyBox = { x: number; y: number; w: number; h: number; cx: number; cy: number }
+type FaceTrack = { id: string; boxes: FaceBox[] }
+type CropKF = { t: number; x: number; y: number; w: number; h: number }
+
+let modelsLoaded = false
+
+async function ensureModelsLoaded(): Promise<void> {
+  if (modelsLoaded)
+  {
+    return
+  }
+  
+  await tf.setBackend('tensorflow')
+  await tf.enableProdMode()
+  await tf.ready()
+  
+  const modelPath = path.join(process.cwd(), 'models')
+  
+  if (!fs.existsSync(modelPath))
+  {
+    throw new Error(`Face detection models not found at ${modelPath}`)
+  }
+  
+  await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath)
+  await faceapi.nets.faceLandmark68Net.loadFromDisk(modelPath)
+  
+  modelsLoaded = true
+  console.log('Face detection models loaded successfully')
+}
+
+export interface ComputeInput {
+  videoPath: string
+  baseW: number
+  baseH: number
+  segStart: number
+  segEnd: number
+  transcript: TranscriptWord[]
+}
+
+export interface Constraints {
+  margin: number
+  maxPan: number
+  easeMs: number
+  centerBiasY: number
+  safeTop: number
+  safeBottom: number
+}
+
+export async function computeCropMap(input: ComputeInput, c: Constraints): Promise<CropKF[] | null> {
+  const speaker = buildSpeakerTimeline(input.transcript, input.segStart, input.segEnd)
+  
+  if (speaker.length === 0)
+  {
+    return null
+  }
+  
+  const faces = await detectAndTrackFaces(input.videoPath, input.segStart, input.segEnd, input.baseW, input.baseH)
+  
+  if (faces.length === 0)
+  {
+    return null
+  }
+  
+  const mapping = mapSpeakersToTracks(speaker, faces)
+  
+  if (mapping.length === 0)
+  {
+    return null
+  }
+  
+  const raw = buildKeyframes(mapping, faces, input.baseW, input.baseH, c)
+  const smoothed = smoothAndConstrain(raw, input.baseW, input.baseH, input.segStart, input.segEnd, c)
+  
+  if (smoothed.length === 0)
+  {
+    return null
+  }
+  
+  return smoothed
+}
+
+function buildSpeakerTimeline(words: TranscriptWord[], segStart: number, segEnd: number): SpeakerWindow[] {
+  const win: SpeakerWindow[] = []
+  let cur = null as SpeakerWindow | null
+  
+  for (const w of words)
+  {
+    if (w.t < segStart)
+    {
+      continue
+    }
+    
+    if (w.t > segEnd)
+    {
+      break
+    }
+    
+    const sp = w.speaker ?? 'spk'
+    
+    if (!cur)
+    {
+      cur = { start: Math.max(w.t, segStart), end: Math.min(w.end, segEnd), speakerId: sp }
+      continue
+    }
+    
+    if (cur.speakerId === sp)
+    {
+      cur.end = Math.min(w.end, segEnd)
+    }
+    else
+    {
+      if (cur.end - cur.start > 0)
+      {
+        win.push(cur)
+      }
+      cur = { start: Math.max(w.t, segStart), end: Math.min(w.end, segEnd), speakerId: sp }
+    }
+  }
+  
+  if (cur && cur.end - cur.start > 0)
+  {
+    win.push(cur)
+  }
+  
+  return mergeShortWindows(win)
+}
+
+function mergeShortWindows(w: SpeakerWindow[]): SpeakerWindow[] {
+  if (w.length === 0)
+  {
+    return w
+  }
+  
+  const minHold = Number(process.env.FRAMING_MIN_SPEAKER_HOLD_MS || 600) / 1000
+  const out: SpeakerWindow[] = []
+  let cur = w[0]
+  
+  for (let i = 1; i < w.length; i++)
+  {
+    const nxt = w[i]
+    
+    if (nxt.start - cur.end < minHold && nxt.speakerId === cur.speakerId)
+    {
+      cur.end = nxt.end
+    }
+    else
+    {
+      out.push(cur)
+      cur = nxt
+    }
+  }
+  
+  out.push(cur)
+  
+  return out.filter(s => s.end - s.start >= minHold)
+}
+
+async function detectAndTrackFaces(videoPath: string, segStart: number, segEnd: number, origW: number, origH: number): Promise<FaceTrack[]> {
+  try
+  {
+    await ensureModelsLoaded()
+    
+    const sampleFps = Number(process.env.FRAMING_SAMPLE_FPS || 3)
+    const duration = segEnd - segStart
+    const frameInterval = 1 / sampleFps
+    const frameCount = Math.ceil(duration * sampleFps)
+    const sampledFrameWidth = 640
+    
+    const frames: Array<{ t: number; tensor: tf.Tensor3D }> = []
+    const tempDir = path.join(process.cwd(), 'tmp', `frames_${Date.now()}`)
+    fs.mkdirSync(tempDir, { recursive: true })
+    
+    try
+    {
+      await extractFrames(videoPath, segStart, segEnd, sampleFps, tempDir)
+      
+      const frameFiles = fs.readdirSync(tempDir).filter(f => f.endsWith('.jpg')).sort()
+      
+      for (let i = 0; i < frameFiles.length && i < frameCount; i++)
+      {
+        const framePath = path.join(tempDir, frameFiles[i])
+        const imageBuffer = fs.readFileSync(framePath)
+        const decoded = tf.node.decodeImage(imageBuffer, 3) as tf.Tensor3D
+        const t = segStart + i * frameInterval
+        frames.push({ t, tensor: decoded })
+      }
+      
+      const detections: Array<{ t: number; faces: faceapi.WithFaceLandmarks<{ detection: faceapi.FaceDetection }>[] }> = []
+      const options = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.6 })
+      
+      for (const frame of frames)
+      {
+        const result = await faceapi.detectAllFaces(frame.tensor as any, options).withFaceLandmarks()
+        detections.push({ t: frame.t, faces: result })
+      }
+      
+      const sampledHeight = frames.length > 0 ? frames[0].tensor.shape[0] : origH
+      const sampledWidth = frames.length > 0 ? frames[0].tensor.shape[1] : origW
+      
+      frames.forEach(f => f.tensor.dispose())
+      
+      const scaleX = origW / sampledWidth
+      const scaleY = origH / sampledHeight
+      
+      const tracks = buildFaceTracks(detections, scaleX, scaleY)
+      return tracks
+    }
+    finally
+    {
+      if (fs.existsSync(tempDir))
+      {
+        fs.rmSync(tempDir, { recursive: true, force: true })
+      }
+    }
+  }
+  catch (error)
+  {
+    console.error('Face detection failed:', error)
+    return []
+  }
+}
+
+async function extractFrames(videoPath: string, segStart: number, segEnd: number, fps: number, outputDir: string): Promise<void> {
+  const duration = segEnd - segStart
+  const ffmpegPath = require('ffmpeg-static')
+  
+  await execFileAsync(ffmpegPath, [
+    '-ss', segStart.toFixed(3),
+    '-i', videoPath,
+    '-t', duration.toFixed(3),
+    '-vf', `fps=${fps},scale=640:-1`,
+    '-q:v', '2',
+    path.join(outputDir, 'frame_%04d.jpg')
+  ])
+}
+
+function buildFaceTracks(detections: Array<{ t: number; faces: faceapi.WithFaceLandmarks<{ detection: faceapi.FaceDetection }>[] }>, scaleX: number, scaleY: number): FaceTrack[] {
+  const tracks: FaceTrack[] = []
+  const maxDistance = 150 * scaleX
+  
+  for (const det of detections)
+  {
+    for (const face of det.faces)
+    {
+      const box = face.detection.box
+      const scaledBox = {
+        x: box.x * scaleX,
+        y: box.y * scaleY,
+        width: box.width * scaleX,
+        height: box.height * scaleY
+      }
+      const center = { x: scaledBox.x + scaledBox.width / 2, y: scaledBox.y + scaledBox.height / 2 }
+      
+      const landmarks = face.landmarks.positions.map(p => [p.x * scaleX, p.y * scaleY])
+      
+      let matched = false
+      
+      for (const track of tracks)
+      {
+        if (track.boxes.length === 0)
+        {
+          continue
+        }
+        
+        const lastBox = track.boxes[track.boxes.length - 1]
+        const lastCenter = { x: lastBox.x + lastBox.w / 2, y: lastBox.y + lastBox.h / 2 }
+        const dist = Math.sqrt(Math.pow(center.x - lastCenter.x, 2) + Math.pow(center.y - lastCenter.y, 2))
+        
+        if (dist < maxDistance)
+        {
+          track.boxes.push({
+            t: det.t,
+            x: Math.round(scaledBox.x),
+            y: Math.round(scaledBox.y),
+            w: Math.round(scaledBox.width),
+            h: Math.round(scaledBox.height),
+            landmarks
+          })
+          matched = true
+          break
+        }
+      }
+      
+      if (!matched)
+      {
+        tracks.push({
+          id: `track_${tracks.length}`,
+          boxes: [{
+            t: det.t,
+            x: Math.round(scaledBox.x),
+            y: Math.round(scaledBox.y),
+            w: Math.round(scaledBox.width),
+            h: Math.round(scaledBox.height),
+            landmarks
+          }]
+        })
+      }
+    }
+  }
+  
+  return tracks.filter(t => t.boxes.length >= 2)
+}
+
+function mapSpeakersToTracks(s: SpeakerWindow[], tracks: FaceTrack[]): Array<{ start: number; end: number; trackId: string }> {
+  const out: Array<{ start: number; end: number; trackId: string }> = []
+  
+  for (const sw of s)
+  {
+    let best = null as { id: string; overlap: number } | null
+    
+    for (const t of tracks)
+    {
+      const ov = overlapSeconds(sw.start, sw.end, t.boxes[0]?.t ?? 0, t.boxes[t.boxes.length - 1]?.t ?? 0)
+      
+      if (!best || ov > best.overlap)
+      {
+        best = { id: t.id, overlap: ov }
+      }
+    }
+    
+    if (best && best.overlap > 0)
+    {
+      out.push({ start: sw.start, end: sw.end, trackId: best.id })
+    }
+  }
+  
+  return out
+}
+
+function overlapSeconds(a: number, b: number, c: number, d: number): number {
+  const x = Math.max(a, c)
+  const y = Math.min(b, d)
+  
+  if (y <= x)
+  {
+    return 0
+  }
+  
+  return y - x
+}
+
+let cachedTorsoMultiplier: number | null = null
+
+function getTorsoMultiplier(): number {
+  if (cachedTorsoMultiplier === null)
+  {
+    const val = parseFloat(process.env.FRAMING_TORSO_MULTIPLIER || '2.7')
+    cachedTorsoMultiplier = isNaN(val) || val <= 0 ? 2.7 : val
+  }
+  
+  return cachedTorsoMultiplier
+}
+
+function estimateBodyBox(faceBox: FaceBox, baseW: number, baseH: number): BodyBox | null {
+  if (!faceBox.landmarks || faceBox.landmarks.length < 68)
+  {
+    return null
+  }
+  
+  const lm = faceBox.landmarks
+  
+  const chinY = lm[8][1]
+  const eyebrowTopY = Math.min(lm[19][1], lm[24][1])
+  const headHeight = chinY - eyebrowTopY
+  
+  if (headHeight <= 0 || !isFinite(headHeight))
+  {
+    return null
+  }
+  
+  const jawLeft = lm[0]
+  const jawRight = lm[16]
+  const shoulderWidth = Math.abs(jawRight[0] - jawLeft[0]) * 1.8
+  
+  if (!isFinite(shoulderWidth) || shoulderWidth <= 0)
+  {
+    return null
+  }
+  
+  const torsoMultiplier = getTorsoMultiplier()
+  const torsoHeight = headHeight * torsoMultiplier
+  
+  const estimatedTopY = eyebrowTopY - headHeight * 0.2
+  const estimatedBottomY = Math.min(chinY + torsoHeight, baseH)
+  
+  const bodyHeight = estimatedBottomY - estimatedTopY
+  const centerX = (jawLeft[0] + jawRight[0]) / 2
+  const centerY = estimatedTopY + bodyHeight * 0.4
+  
+  if (!isFinite(centerX) || !isFinite(centerY))
+  {
+    return null
+  }
+  
+  const bodyLeft = Math.max(0, centerX - shoulderWidth / 2)
+  const bodyRight = Math.min(baseW, centerX + shoulderWidth / 2)
+  const bodyWidth = bodyRight - bodyLeft
+  
+  return {
+    x: bodyLeft,
+    y: estimatedTopY,
+    w: bodyWidth,
+    h: bodyHeight,
+    cx: centerX,
+    cy: centerY
+  }
+}
+
+function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: string }>, tracks: FaceTrack[], baseW: number, baseH: number, c: Constraints): CropKF[] {
+  const out: CropKF[] = []
+  const targetW = Math.floor(baseH * 9 / 16)
+  const targetH = baseH
+  
+  for (const m of mapping)
+  {
+    const tr = tracks.find(t => t.id === m.trackId)
+    
+    if (!tr)
+    {
+      continue
+    }
+    
+    for (const b of tr.boxes)
+    {
+      if (b.t < m.start)
+      {
+        continue
+      }
+      
+      if (b.t > m.end)
+      {
+        break
+      }
+      
+      const bodyBox = estimateBodyBox(b, baseW, baseH)
+      
+      let cx: number
+      let cy: number
+      
+      if (bodyBox)
+      {
+        cx = bodyBox.cx
+        cy = bodyBox.cy - targetH * c.centerBiasY
+      }
+      else
+      {
+        cx = b.x + b.w / 2
+        cy = b.y + b.h * (0.5 - c.centerBiasY)
+      }
+      
+      let x = Math.round(cx - targetW / 2)
+      let y = Math.round(cy - targetH / 2)
+      
+      x = Math.max(0, Math.min(x, baseW - targetW))
+      
+      const safeTop = Math.round(targetH * c.safeTop)
+      const safeBottom = Math.round(targetH * c.safeBottom)
+      
+      y = Math.max(-safeTop, Math.min(y, baseH - targetH + safeBottom))
+      
+      out.push({ t: b.t, x, y, w: targetW, h: targetH })
+    }
+  }
+  
+  return dedupeByTime(out, 0.1)
+}
+
+function dedupeByTime(kf: CropKF[], minDelta: number): CropKF[] {
+  if (kf.length === 0)
+  {
+    return kf
+  }
+  
+  const out: CropKF[] = [kf[0]]
+  
+  for (let i = 1; i < kf.length; i++)
+  {
+    if (kf[i].t - out[out.length - 1].t >= minDelta)
+    {
+      out.push(kf[i])
+    }
+  }
+  
+  return out
+}
+
+function smoothAndConstrain(kf: CropKF[], baseW: number, baseH: number, segStart: number, segEnd: number, c: Constraints): CropKF[] {
+  if (kf.length === 0)
+  {
+    return kf
+  }
+  
+  const win = 3
+  const sm: CropKF[] = []
+  
+  for (let i = 0; i < kf.length; i++)
+  {
+    let sx = 0
+    let sy = 0
+    let n = 0
+    
+    for (let j = Math.max(0, i - win); j <= Math.min(kf.length - 1, i + win); j++)
+    {
+      sx += kf[j].x
+      sy += kf[j].y
+      n += 1
+    }
+    
+    const x = Math.round(sx / n)
+    const y = Math.round(sy / n)
+    sm.push({ t: kf[i].t, x, y, w: kf[i].w, h: kf[i].h })
+  }
+  
+  const out: CropKF[] = [sm[0]]
+  
+  for (let i = 1; i < sm.length; i++)
+  {
+    const dt = Math.max(0.001, sm[i].t - sm[i - 1].t)
+    const dx = sm[i].x - out[out.length - 1].x
+    const dy = sm[i].y - out[out.length - 1].y
+    const maxStep = Math.round(c.maxPan * dt)
+    const nx = stepLimit(out[out.length - 1].x, sm[i].x, maxStep)
+    const ny = stepLimit(out[out.length - 1].y, sm[i].y, maxStep)
+    out.push({ t: sm[i].t, x: nx, y: ny, w: sm[i].w, h: sm[i].h })
+  }
+  
+  return easeSpeakerEdges(out, segStart, segEnd, c.easeMs / 1000)
+}
+
+function stepLimit(a: number, b: number, m: number): number {
+  if (Math.abs(b - a) <= m)
+  {
+    return b
+  }
+  
+  if (b > a)
+  {
+    return a + m
+  }
+  
+  return a - m
+}
+
+function easeSpeakerEdges(kf: CropKF[], segStart: number, segEnd: number, easeS: number): CropKF[] {
+  if (kf.length < 2)
+  {
+    return kf
+  }
+  
+  const out: CropKF[] = [kf[0]]
+  
+  for (let i = 1; i < kf.length; i++)
+  {
+    const t = kf[i].t
+    const p = out[out.length - 1]
+    const fromStart = Math.min(1, Math.max(0, (t - segStart) / easeS))
+    const fromEnd = Math.min(1, Math.max(0, (segEnd - t) / easeS))
+    const alpha = Math.min(fromStart, fromEnd)
+    const x = Math.round(p.x + (kf[i].x - p.x) * alpha)
+    const y = Math.round(p.y + (kf[i].y - p.y) * alpha)
+    out.push({ t, x, y, w: kf[i].w, h: kf[i].h })
+  }
+  
+  return out
+}
+
+export function buildPiecewiseExpr(kf: CropKF[], key: 'x' | 'y'): string {
+  if (kf.length === 0)
+  {
+    return '0'
+  }
+  
+  const parts: string[] = []
+  
+  const firstVal = key === 'x' ? kf[0].x : kf[0].y
+  parts.push(`lt(t,${kf[0].t.toFixed(3)})*${firstVal.toFixed(0)}`)
+  
+  for (let i = 0; i < kf.length - 1; i++)
+  {
+    const a = kf[i]
+    const b = kf[i + 1]
+    const ta = a.t
+    const tb = b.t
+    const va = key === 'x' ? a.x : a.y
+    const vb = key === 'x' ? b.x : b.y
+    const slope = (vb - va) / Math.max(0.001, tb - ta)
+    const expr = `between(t,${ta.toFixed(3)},${tb.toFixed(3)})*(${va.toFixed(0)}+(${slope.toFixed(6)})*(t-${ta.toFixed(3)}))`
+    parts.push(expr)
+  }
+  
+  const last = key === 'x' ? kf[kf.length - 1].x : kf[kf.length - 1].y
+  parts.push(`gte(t,${kf[kf.length - 1].t.toFixed(3)})*${last.toFixed(0)}`)
+  
+  return parts.join('+')
+}
