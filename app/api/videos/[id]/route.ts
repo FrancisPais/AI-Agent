@@ -1,7 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/src/lib/prisma'
-import { getS3Url } from '@/src/services/s3'
+import { getSignedUrlForKey, getS3Url } from '@/src/services/s3'
 import { requireAuth } from '@/src/lib/session'
+
+async function getUrlForKey(key: string): Promise<string> {
+  try {
+    return await getSignedUrlForKey(key, 7200)
+  }
+  catch (error: any) {
+    if (error.name === 'CredentialsProviderError')
+    {
+      console.warn('S3 credentials not configured, using direct URLs')
+    }
+    else
+    {
+      console.warn('Failed to generate signed URL, falling back to direct URL:', error)
+    }
+    return getS3Url(key)
+  }
+}
 
 export async function GET(
   request: NextRequest,
@@ -27,12 +44,14 @@ export async function GET(
       )
     }
     
-    const clipsWithUrls = video.clips.map(clip => ({
-      ...clip,
-      videoUrl: getS3Url(clip.s3VideoKey),
-      thumbUrl: getS3Url(clip.s3ThumbKey),
-      srtUrl: getS3Url(clip.s3SrtKey)
-    }))
+    const clipsWithUrls = await Promise.all(
+      video.clips.map(async (clip) => ({
+        ...clip,
+        videoUrl: await getUrlForKey(clip.s3VideoKey),
+        thumbUrl: await getUrlForKey(clip.s3ThumbKey),
+        srtUrl: await getUrlForKey(clip.s3SrtKey)
+      }))
+    )
     
     return NextResponse.json({
       ...video,

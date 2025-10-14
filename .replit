@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "web", "python-3.11"]
+modules = ["nodejs-20", "web", "python-3.11", "postgresql-16"]
 [agent]
 expertMode = true
 integrations = ["youtube:1.0.0"]
@@ -46,6 +46,15 @@ args = "bash -c \"redis-server --daemonize yes --port 6379 2>/dev/null || true; 
 [workflows.workflow.metadata]
 outputType = "console"
 
+[[workflows.workflow]]
+name = "tiktok worker"
+mode = "sequential"
+author = 48409791
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run worker:tiktok"
+
 [[ports]]
 localPort = 5000
 externalPort = 80
@@ -53,3 +62,7 @@ externalPort = 80
 [[ports]]
 localPort = 6379
 externalPort = 3000
+
+[[ports]]
+localPort = 36393
+externalPort = 3001

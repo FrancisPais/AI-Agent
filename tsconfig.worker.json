@@ -3,7 +3,8 @@
   "compilerOptions": {
     "module": "commonjs",
     "noEmit": false,
-    "outDir": "dist"
+    "outDir": "dist",
+    "typeRoots": ["./node_modules/@types", "./types"]
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "types/**/*"]
 }
