@@ -325,20 +325,159 @@ function smoothKeyframes(kf: CropKF[]): CropKF[] {
   const windowSize = 2
   const smoothed: CropKF[] = []
 
-  for (let i = 0; i < kf.length; i++) {
-    let sumX = 0
-    let sumY = 0
-    let count = 0
+function findBoxNearTime(boxes: FaceBox[], time: number, tolerance: number): FaceBox | null {
+  let best: FaceBox | null = null
+  let bestDelta = Infinity
+
+  for (const box of boxes)
+  {
+    const delta = Math.abs(box.t - time)
+
+    if (delta <= tolerance && delta < bestDelta)
+    {
+      best = box
+      bestDelta = delta
+    }
+  }
+
+  return best
+}
+
+function computeGroupBounds(
+  tracks: FaceTrack[],
+  time: number,
+  baseW: number,
+  baseH: number,
+): { minX: number; maxX: number } | null {
+  const tolerance = Math.max(0.1, getSampleStepSeconds())
+  let minX = Infinity
+  let maxX = -Infinity
+  let count = 0
+
+  for (const track of tracks)
+  {
+    const candidate = findBoxNearTime(track.boxes, time, tolerance)
+
+    if (!candidate)
+    {
+      continue
+    }
+
+    const body = estimateBodyBox(candidate, baseW, baseH)
+    const left = body ? body.x : candidate.x
+    const right = body ? body.x + body.w : candidate.x + candidate.w
+
+    minX = Math.min(minX, left)
+    maxX = Math.max(maxX, right)
+    count += 1
+  }
+
+  if (!isFinite(minX) || !isFinite(maxX) || count <= 1)
+  {
+    return null
+  }
+
+  minX = Math.max(0, minX)
+  maxX = Math.min(baseW, maxX)
+
+  if (maxX <= minX)
+  {
+    return null
+  }
+
+  return { minX, maxX }
+}
+
+export function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: string }>, tracks: FaceTrack[], baseW: number, baseH: number, c: Constraints): CropKF[] {
+  const out: CropKF[] = []
+  const targetW = Math.floor(baseH * 9 / 16)
+  const targetH = baseH
 
     for (let j = i - windowSize; j <= i + windowSize; j++) {
       if (j < 0 || j >= kf.length) {
         continue
       }
+      
+      if (b.t > m.end)
+      {
+        break
+      }
+      
+      const bodyBox = estimateBodyBox(b, baseW, baseH)
+      
+      let cx: number
+      let cy: number
+      
+      if (bodyBox)
+      {
+        cx = bodyBox.cx
+        cy = bodyBox.cy - targetH * c.centerBiasY
+      }
+      else
+      {
+        cx = b.x + b.w / 2
+        cy = b.y + b.h * (0.5 - c.centerBiasY)
+      }
+      
+      const marginPx = Math.max(0, c.margin) * targetW
+      const minCropX = 0
+      const maxCropX = Math.max(0, baseW - targetW)
 
-      sumX += kf[j].x
-      sumY += kf[j].y
-      count += 1
-    }
+      let idealX = cx - targetW / 2
+
+      const groupBounds = computeGroupBounds(tracks, b.t, baseW, baseH)
+
+      if (groupBounds)
+      {
+        const span = groupBounds.maxX - groupBounds.minX
+        const groupCenter = groupBounds.minX + span / 2
+        let groupX = groupCenter - targetW / 2
+
+        if (span <= targetW)
+        {
+          const minGroupX = Math.max(minCropX, Math.ceil(groupBounds.maxX - targetW))
+          const maxGroupX = Math.min(maxCropX, Math.floor(groupBounds.minX))
+
+          if (minGroupX <= maxGroupX)
+          {
+            groupX = Math.min(Math.max(groupX, minGroupX), maxGroupX)
+          }
+        }
+
+        idealX = Math.max(minCropX, Math.min(groupX, maxCropX))
+      }
+
+      if (marginPx > 0)
+      {
+        const marginMin = cx - targetW + marginPx
+        const marginMax = cx - marginPx
+        const allowedMin = Math.max(minCropX, marginMin)
+        const allowedMax = Math.min(maxCropX, marginMax)
+
+        if (allowedMin <= allowedMax)
+        {
+          if (idealX < allowedMin)
+          {
+            idealX = allowedMin
+          }
+          else if (idealX > allowedMax)
+          {
+            idealX = allowedMax
+          }
+        }
+        else if (cx < marginPx)
+        {
+          idealX = minCropX
+        }
+        else if (baseW - cx < marginPx)
+        {
+          idealX = maxCropX
+        }
+      }
+
+      idealX = enforceGroupBounds(idealX, targetW, baseW, groupBounds)
+
+      let x = Math.round(idealX)
 
     smoothed.push({
       t: kf[i].t,
@@ -352,10 +491,39 @@ function smoothKeyframes(kf: CropKF[]): CropKF[] {
   return smoothed
 }
 
-function applyPanLimits(kf: CropKF[], maxPanPerSecond: number): CropKF[] {
-  if (kf.length < 2) {
-    return kf
-  }
+      x = enforceGroupBounds(x, targetW, baseW, groupBounds)
+      x = Math.max(minCropX, Math.min(x, maxCropX))
+
+      if (groupBounds)
+      {
+        const span = groupBounds.maxX - groupBounds.minX
+
+        if (span <= targetW)
+        {
+          const minGroupX = Math.max(minCropX, Math.ceil(groupBounds.maxX - targetW))
+          const maxGroupX = Math.min(maxCropX, Math.floor(groupBounds.minX))
+
+          if (minGroupX <= maxGroupX)
+          {
+            if (x < minGroupX)
+            {
+              x = minGroupX
+            }
+            else if (x > maxGroupX)
+            {
+              x = maxGroupX
+            }
+          }
+        }
+        else
+        {
+          const centerX = groupBounds.minX + span / 2
+          const centered = Math.round(centerX - targetW / 2)
+          x = Math.max(minCropX, Math.min(centered, maxCropX))
+        }
+      }
+
+      let y = Math.round(cy - targetH / 2)
 
   const limited: CropKF[] = [kf[0]]
 
