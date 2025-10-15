@@ -105,28 +105,89 @@ function median(xs: number[]): number {
 
 export function generateChapterWindows(chapters: Chapter[], introIdx: number | null): Array<{ start: number; end: number; chapterTitle: string }> {
   const ws: Array<{ start: number; end: number; chapterTitle: string }> = []
-  
+
   for (let i = 0; i < chapters.length; i++) {
     if (introIdx !== null && i === introIdx) {
       continue
     }
-    
+
     const c = chapters[i]
-    const span = c.endSec - c.startSec
-    const step = Math.max(45, Math.floor(span * 0.1))
+    const span = Math.max(0, c.endSec - c.startSec)
+    const step = Math.max(40, Math.floor(span * 0.12))
     let t = c.startSec
-    
+    const chapterWindows: Array<{ start: number; end: number; chapterTitle: string }> = []
+
     while (t + 25 <= c.endSec) {
-      ws.push({ 
-        start: t, 
-        end: Math.min(c.endSec, t + 75),
+      const end = Math.min(c.endSec, t + 82)
+      chapterWindows.push({
+        start: t,
+        end,
         chapterTitle: c.title
       })
       t += step
     }
+
+    if (chapterWindows.length === 0) {
+      chapterWindows.push({
+        start: c.startSec,
+        end: Math.min(c.endSec, c.startSec + Math.min(82, span || 82)),
+        chapterTitle: c.title
+      })
+    } else {
+      const last = chapterWindows[chapterWindows.length - 1]
+      if (last.end < c.endSec - 8) {
+        const tailStart = Math.max(c.startSec, c.endSec - 82)
+        if (chapterWindows[chapterWindows.length - 1].start !== tailStart) {
+          chapterWindows.push({
+            start: tailStart,
+            end: c.endSec,
+            chapterTitle: c.title
+          })
+        }
+      }
+    }
+
+    ws.push(...chapterWindows)
   }
-  
+
   return ws
+}
+
+function generateFullCoverageWindows(
+  allWords: TranscriptWord[],
+  videoDuration: number
+): Array<{ start: number; end: number; chapterTitle: string }> {
+  const lastWordEnd = allWords.length > 0 ? allWords[allWords.length - 1].end : 0
+  const coverageEnd = Math.max(videoDuration, lastWordEnd)
+
+  if (coverageEnd <= 0) {
+    return []
+  }
+
+  const windows: Array<{ start: number; end: number; chapterTitle: string }> = []
+  const stride = coverageEnd > 1200 ? 75 : 55
+  const windowLength = coverageEnd > 900 ? 95 : 82
+
+  for (let start = 0; start < coverageEnd; start += stride) {
+    const end = Math.min(coverageEnd, start + windowLength)
+    windows.push({ start, end, chapterTitle: 'Full Video' })
+  }
+
+  if (windows.length === 0) {
+    windows.push({ start: 0, end: coverageEnd, chapterTitle: 'Full Video' })
+  } else {
+    const last = windows[windows.length - 1]
+    if (last.end < coverageEnd - 5) {
+      const tailStart = Math.max(0, coverageEnd - windowLength)
+      if (windows[windows.length - 1].start !== tailStart) {
+        windows.push({ start: tailStart, end: coverageEnd, chapterTitle: 'Full Video' })
+      } else {
+        windows[windows.length - 1] = { start: tailStart, end: coverageEnd, chapterTitle: 'Full Video' }
+      }
+    }
+  }
+
+  return windows
 }
 
 function detectHookPatterns(text: string): { hasQuestion: boolean; hasBoldClaim: boolean; hasNumbers: boolean } {
@@ -509,9 +570,25 @@ export function detectEnhancedSegments(
   const detectedLanguage = transcript[0]?.language
   const introIdx = findIntroChapterIndex(chapters, detectedLanguage)
   
-  const windows = chapters.length > 0 
+  let windows = chapters.length > 0
     ? generateChapterWindows(chapters, introIdx)
-    : [{ start: 180, end: videoDuration || allWords[allWords.length - 1].end, chapterTitle: 'Main Content' }]
+    : generateFullCoverageWindows(allWords, videoDuration)
+
+  if (chapters.length > 0) {
+    const fallbackWindows = generateFullCoverageWindows(allWords, videoDuration)
+    const maxExistingEnd = windows.reduce((max, w) => Math.max(max, w.end), 0)
+    const coverageEnd = fallbackWindows.length > 0 ? fallbackWindows[fallbackWindows.length - 1].end : maxExistingEnd
+
+    if (coverageEnd > maxExistingEnd + 5) {
+      windows = windows.concat(
+        fallbackWindows.filter(w => w.start >= maxExistingEnd - 60)
+      )
+    }
+  }
+
+  windows = windows
+    .sort((a, b) => a.start - b.start)
+    .filter((w, idx, arr) => idx === 0 || w.start !== arr[idx - 1].start || w.end !== arr[idx - 1].end)
   
   const candidates: EnhancedSegment[] = []
   
@@ -547,8 +624,8 @@ export function detectEnhancedSegments(
         const startSec = segWords[0].start
         const endSec = segWords[segWords.length - 1].end
         const duration = endSec - startSec
-        
-        if (duration < 20 || duration > 75)
+
+        if (duration < 20 || duration > 82)
         {
           continue
         }
