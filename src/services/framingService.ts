@@ -634,79 +634,6 @@ function findBoxNearTime(boxes: FaceBox[], time: number, tolerance: number): Fac
   return best
 }
 
-function clamp(value: number, min: number, max: number): number {
-  if (value < min)
-  {
-    return min
-  }
-
-  if (value > max)
-  {
-    return max
-  }
-
-  return value
-}
-
-function enforceGroupBounds(
-  desiredX: number,
-  targetW: number,
-  baseW: number,
-  bounds: { minX: number; maxX: number } | null,
-): number {
-  const minCropX = 0
-  const maxCropX = Math.max(0, baseW - targetW)
-  const normalize = (value: number) => {
-    const clamped = clamp(value, minCropX, maxCropX)
-
-    if (Number.isInteger(desiredX))
-    {
-      return Math.round(clamped)
-    }
-
-    return clamped
-  }
-
-  if (!bounds)
-  {
-    return normalize(desiredX)
-  }
-
-  const span = bounds.maxX - bounds.minX
-
-  if (span <= 0)
-  {
-    return normalize(desiredX)
-  }
-
-  if (span >= targetW)
-  {
-    const centered = bounds.minX + span / 2 - targetW / 2
-    return normalize(centered)
-  }
-
-  const minAllowed = clamp(bounds.maxX - targetW, minCropX, maxCropX)
-  const maxAllowed = clamp(bounds.minX, minCropX, maxCropX)
-
-  if (minAllowed <= maxAllowed)
-  {
-    if (desiredX < minAllowed)
-    {
-      return normalize(minAllowed)
-    }
-
-    if (desiredX > maxAllowed)
-    {
-      return normalize(maxAllowed)
-    }
-
-    return normalize(desiredX)
-  }
-
-  const fallback = bounds.minX + span / 2 - targetW / 2
-  return normalize(fallback)
-}
-
 function computeGroupBounds(
   tracks: FaceTrack[],
   time: number,
@@ -802,6 +729,26 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
 
       const groupBounds = computeGroupBounds(tracks, b.t, baseW, baseH)
 
+      if (groupBounds)
+      {
+        const span = groupBounds.maxX - groupBounds.minX
+        const groupCenter = groupBounds.minX + span / 2
+        let groupX = groupCenter - targetW / 2
+
+        if (span <= targetW)
+        {
+          const minGroupX = Math.max(minCropX, Math.ceil(groupBounds.maxX - targetW))
+          const maxGroupX = Math.min(maxCropX, Math.floor(groupBounds.minX))
+
+          if (minGroupX <= maxGroupX)
+          {
+            groupX = Math.min(Math.max(groupX, minGroupX), maxGroupX)
+          }
+        }
+
+        idealX = Math.max(minCropX, Math.min(groupX, maxCropX))
+      }
+
       if (marginPx > 0)
       {
         const marginMin = cx - targetW + marginPx
@@ -854,6 +801,35 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
 
       x = enforceGroupBounds(x, targetW, baseW, groupBounds)
       x = Math.max(minCropX, Math.min(x, maxCropX))
+
+      if (groupBounds)
+      {
+        const span = groupBounds.maxX - groupBounds.minX
+
+        if (span <= targetW)
+        {
+          const minGroupX = Math.max(minCropX, Math.ceil(groupBounds.maxX - targetW))
+          const maxGroupX = Math.min(maxCropX, Math.floor(groupBounds.minX))
+
+          if (minGroupX <= maxGroupX)
+          {
+            if (x < minGroupX)
+            {
+              x = minGroupX
+            }
+            else if (x > maxGroupX)
+            {
+              x = maxGroupX
+            }
+          }
+        }
+        else
+        {
+          const centerX = groupBounds.minX + span / 2
+          const centered = Math.round(centerX - targetW / 2)
+          x = Math.max(minCropX, Math.min(centered, maxCropX))
+        }
+      }
 
       let y = Math.round(cy - targetH / 2)
 
