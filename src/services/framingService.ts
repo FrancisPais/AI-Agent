@@ -777,6 +777,8 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
         }
       }
 
+      idealX = enforceGroupBounds(idealX, targetW, baseW, groupBounds)
+
       let x = Math.round(idealX)
 
       if (marginPx > 0)
@@ -797,6 +799,7 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
         }
       }
 
+      x = enforceGroupBounds(x, targetW, baseW, groupBounds)
       x = Math.max(minCropX, Math.min(x, maxCropX))
 
       if (groupBounds)
