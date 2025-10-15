@@ -1,43 +1,17 @@
 import * as tf from '@tensorflow/tfjs-node'
 import * as faceapi from '@vladmandic/face-api/dist/face-api.node.js'
-import * as path from 'path'
 import * as fs from 'fs'
+import * as path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
 
-type TranscriptWord = { t: number; end: number; text: string; speaker?: string }
-type SpeakerWindow = { start: number; end: number; speakerId: string }
-type FaceBox = { t: number; x: number; y: number; w: number; h: number; landmarks?: number[][] }
-type BodyBox = { x: number; y: number; w: number; h: number; cx: number; cy: number }
-type FaceTrack = { id: string; boxes: FaceBox[] }
-type CropKF = { t: number; x: number; y: number; w: number; h: number }
-
-let modelsLoaded = false
-
-async function ensureModelsLoaded(): Promise<void> {
-  if (modelsLoaded)
-  {
-    return
-  }
-  
-  await tf.setBackend('tensorflow')
-  await tf.enableProdMode()
-  await tf.ready()
-  
-  const modelPath = path.join(process.cwd(), 'models')
-  
-  if (!fs.existsSync(modelPath))
-  {
-    throw new Error(`Face detection models not found at ${modelPath}`)
-  }
-  
-  await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath)
-  await faceapi.nets.faceLandmark68Net.loadFromDisk(modelPath)
-  
-  modelsLoaded = true
-  console.log('Face detection models loaded successfully')
+export type TranscriptWord = {
+  t: number
+  end: number
+  text: string
+  speaker?: string
 }
 
 export interface ComputeInput {
@@ -58,828 +32,622 @@ export interface Constraints {
   safeBottom: number
 }
 
-export async function computeCropMap(input: ComputeInput, c: Constraints): Promise<CropKF[] | null> {
-  const speaker = buildSpeakerTimeline(input.transcript, input.segStart, input.segEnd)
-  
-  if (speaker.length === 0)
-  {
+export type CropKF = {
+  t: number
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+type FaceBox = {
+  x: number
+  y: number
+  w: number
+  h: number
+  score: number
+}
+
+type FaceSnapshot = {
+  t: number
+  boxes: FaceBox[]
+}
+
+type TrackSample = {
+  t: number
+  box: FaceBox
+}
+
+type FaceTrack = {
+  id: string
+  samples: TrackSample[]
+}
+
+let modelsLoaded = false
+
+async function ensureModelsLoaded(): Promise<void> {
+  if (modelsLoaded) {
+    return
+  }
+
+  await tf.setBackend('tensorflow')
+  await tf.enableProdMode()
+  await tf.ready()
+
+  const modelPath = path.join(process.cwd(), 'models')
+
+  if (!fs.existsSync(modelPath)) {
+    throw new Error(`Face detection models not found at ${modelPath}`)
+  }
+
+  await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath)
+  await faceapi.nets.faceLandmark68Net.loadFromDisk(modelPath)
+
+  modelsLoaded = true
+  console.log('Face detection models loaded successfully')
+}
+
+const DEFAULT_SAMPLE_FPS = Number(process.env.FRAMING_SAMPLE_FPS || 3)
+const MIN_FACE_CONFIDENCE = Number(process.env.FRAMING_MIN_FACE_CONFIDENCE || 0.6)
+const MAX_TRACK_JOIN_GAP_S = Number(process.env.FRAMING_MAX_TRACK_GAP_S || 1.2)
+const MAX_INTERP_GAP_S = Number(process.env.FRAMING_MAX_INTERP_GAP_S || 0.8)
+const TRACK_HOLD_S = Number(process.env.FRAMING_TRACK_HOLD_S || 0.6)
+const MAX_ASSOCIATION_DISTANCE = Number(
+  process.env.FRAMING_MAX_ASSOCIATION_DISTANCE || 180,
+)
+const MIN_TRACK_LENGTH = Number(process.env.FRAMING_MIN_TRACK_SAMPLES || 2)
+
+export async function computeCropMap(
+  input: ComputeInput,
+  constraints: Constraints,
+): Promise<CropKF[] | null> {
+  await ensureModelsLoaded()
+
+  const detections = await detectFacesTimeline(
+    input.videoPath,
+    input.segStart,
+    input.segEnd,
+    input.baseW,
+    input.baseH,
+  )
+
+  if (detections.length === 0) {
     return null
   }
-  
-  const faces = await detectAndTrackFaces(input.videoPath, input.segStart, input.segEnd, input.baseW, input.baseH)
-  
-  if (faces.length === 0)
-  {
+
+  const tracks = buildFaceTracks(detections)
+
+  const rawKeyframes = buildCropKeyframes(
+    detections,
+    tracks,
+    input.baseW,
+    input.baseH,
+    constraints,
+  )
+
+  if (rawKeyframes.length === 0) {
     return null
   }
-  
-  const mapping = mapSpeakersToTracks(speaker, faces)
-  
-  if (mapping.length === 0)
-  {
-    return null
-  }
-  
-  const raw = buildKeyframes(mapping, faces, input.baseW, input.baseH, c)
-  const smoothed = smoothAndConstrain(raw, input.baseW, input.baseH, input.segStart, input.segEnd, c)
-  
-  if (smoothed.length === 0)
-  {
-    return null
-  }
-  
-  return smoothed
+
+  const smoothed = smoothKeyframes(rawKeyframes)
+  const limited = applyPanLimits(smoothed, constraints.maxPan)
+  const eased = easeSegmentEdges(
+    limited,
+    input.segStart,
+    input.segEnd,
+    constraints.easeMs / 1000,
+  )
+
+  return eased.length > 0 ? dedupeByTime(eased, 0.1) : null
 }
 
-function buildSpeakerTimeline(words: TranscriptWord[], segStart: number, segEnd: number): SpeakerWindow[] {
-  const win: SpeakerWindow[] = []
-  let cur = null as SpeakerWindow | null
-  
-  for (const w of words)
-  {
-    if (w.t < segStart)
-    {
-      continue
-    }
-    
-    if (w.t > segEnd)
-    {
-      break
-    }
-    
-    const sp = w.speaker ?? 'spk'
-    
-    if (!cur)
-    {
-      cur = { start: Math.max(w.t, segStart), end: Math.min(w.end, segEnd), speakerId: sp }
-      continue
-    }
-    
-    if (cur.speakerId === sp)
-    {
-      cur.end = Math.min(w.end, segEnd)
-    }
-    else
-    {
-      if (cur.end - cur.start > 0)
-      {
-        win.push(cur)
-      }
-      cur = { start: Math.max(w.t, segStart), end: Math.min(w.end, segEnd), speakerId: sp }
-    }
-  }
-  
-  if (cur && cur.end - cur.start > 0)
-  {
-    win.push(cur)
-  }
-  
-  return mergeShortWindows(win)
-}
+async function detectFacesTimeline(
+  videoPath: string,
+  segStart: number,
+  segEnd: number,
+  baseW: number,
+  baseH: number,
+): Promise<FaceSnapshot[]> {
+  const sampleFps = Math.max(1, DEFAULT_SAMPLE_FPS)
+  const duration = Math.max(0, segEnd - segStart)
 
-function mergeShortWindows(w: SpeakerWindow[]): SpeakerWindow[] {
-  if (w.length === 0)
-  {
-    return w
-  }
-  
-  const minHold = Number(process.env.FRAMING_MIN_SPEAKER_HOLD_MS || 600) / 1000
-  const out: SpeakerWindow[] = []
-  let cur = w[0]
-  
-  for (let i = 1; i < w.length; i++)
-  {
-    const nxt = w[i]
-    
-    if (nxt.start - cur.end < minHold && nxt.speakerId === cur.speakerId)
-    {
-      cur.end = nxt.end
-    }
-    else
-    {
-      out.push(cur)
-      cur = nxt
-    }
-  }
-  
-  out.push(cur)
-  
-  return out.filter(s => s.end - s.start >= minHold)
-}
-
-async function detectAndTrackFaces(videoPath: string, segStart: number, segEnd: number, origW: number, origH: number): Promise<FaceTrack[]> {
-  try
-  {
-    await ensureModelsLoaded()
-    
-    const sampleFps = Number(process.env.FRAMING_SAMPLE_FPS || 3)
-    const duration = segEnd - segStart
-    const frameInterval = 1 / sampleFps
-    const frameCount = Math.ceil(duration * sampleFps)
-    const sampledFrameWidth = 640
-    
-    const frames: Array<{ t: number; tensor: tf.Tensor3D }> = []
-    const tempDir = path.join(process.cwd(), 'tmp', `frames_${Date.now()}`)
-    fs.mkdirSync(tempDir, { recursive: true })
-    
-    try
-    {
-      await extractFrames(videoPath, segStart, segEnd, sampleFps, tempDir)
-      
-      const frameFiles = fs.readdirSync(tempDir).filter(f => f.endsWith('.jpg')).sort()
-      
-      for (let i = 0; i < frameFiles.length && i < frameCount; i++)
-      {
-        const framePath = path.join(tempDir, frameFiles[i])
-        const imageBuffer = fs.readFileSync(framePath)
-        const decoded = tf.node.decodeImage(imageBuffer, 3) as tf.Tensor3D
-        const t = segStart + i * frameInterval
-        frames.push({ t, tensor: decoded })
-      }
-      
-      const detections: Array<{ t: number; faces: faceapi.WithFaceLandmarks<{ detection: faceapi.FaceDetection }>[] }> = []
-      const options = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.6 })
-      
-      for (const frame of frames)
-      {
-        const result = await faceapi.detectAllFaces(frame.tensor as any, options).withFaceLandmarks()
-        detections.push({ t: frame.t, faces: result })
-      }
-      
-      const sampledHeight = frames.length > 0 ? frames[0].tensor.shape[0] : origH
-      const sampledWidth = frames.length > 0 ? frames[0].tensor.shape[1] : origW
-      
-      frames.forEach(f => f.tensor.dispose())
-      
-      const scaleX = origW / sampledWidth
-      const scaleY = origH / sampledHeight
-      
-      const tracks = buildFaceTracks(detections, scaleX, scaleY)
-      return tracks
-    }
-    finally
-    {
-      if (fs.existsSync(tempDir))
-      {
-        fs.rmSync(tempDir, { recursive: true, force: true })
-      }
-    }
-  }
-  catch (error)
-  {
-    console.error('Face detection failed:', error)
-    return []
-  }
-}
-
-async function extractFrames(videoPath: string, segStart: number, segEnd: number, fps: number, outputDir: string): Promise<void> {
-  const duration = segEnd - segStart
-  const ffmpegPath = require('ffmpeg-static')
-  
-  await execFileAsync(ffmpegPath, [
-    '-ss', segStart.toFixed(3),
-    '-i', videoPath,
-    '-t', duration.toFixed(3),
-    '-vf', `fps=${fps},scale=640:-1`,
-    '-q:v', '2',
-    path.join(outputDir, 'frame_%04d.jpg')
-  ])
-}
-
-function buildFaceTracks(detections: Array<{ t: number; faces: faceapi.WithFaceLandmarks<{ detection: faceapi.FaceDetection }>[] }>, scaleX: number, scaleY: number): FaceTrack[] {
-  const tracks: FaceTrack[] = []
-  const maxDistance = 150 * scaleX
-  
-  for (const det of detections)
-  {
-    for (const face of det.faces)
-    {
-      const box = face.detection.box
-      const scaledBox = {
-        x: box.x * scaleX,
-        y: box.y * scaleY,
-        width: box.width * scaleX,
-        height: box.height * scaleY
-      }
-      const center = { x: scaledBox.x + scaledBox.width / 2, y: scaledBox.y + scaledBox.height / 2 }
-      
-      const landmarks = face.landmarks.positions.map(p => [p.x * scaleX, p.y * scaleY])
-      
-      let matched = false
-      
-      for (const track of tracks)
-      {
-        if (track.boxes.length === 0)
-        {
-          continue
-        }
-        
-        const lastBox = track.boxes[track.boxes.length - 1]
-        const lastCenter = { x: lastBox.x + lastBox.w / 2, y: lastBox.y + lastBox.h / 2 }
-        const dist = Math.sqrt(Math.pow(center.x - lastCenter.x, 2) + Math.pow(center.y - lastCenter.y, 2))
-        
-        if (dist < maxDistance)
-        {
-          track.boxes.push({
-            t: det.t,
-            x: Math.round(scaledBox.x),
-            y: Math.round(scaledBox.y),
-            w: Math.round(scaledBox.width),
-            h: Math.round(scaledBox.height),
-            landmarks
-          })
-          matched = true
-          break
-        }
-      }
-      
-      if (!matched)
-      {
-        tracks.push({
-          id: `track_${tracks.length}`,
-          boxes: [{
-            t: det.t,
-            x: Math.round(scaledBox.x),
-            y: Math.round(scaledBox.y),
-            w: Math.round(scaledBox.width),
-            h: Math.round(scaledBox.height),
-            landmarks
-          }]
-        })
-      }
-    }
-  }
-  
-  return tracks.filter(t => t.boxes.length >= 2)
-}
-
-function mapSpeakersToTracks(s: SpeakerWindow[], tracks: FaceTrack[]): Array<{ start: number; end: number; trackId: string }> {
-  if (s.length === 0 || tracks.length === 0)
-  {
+  if (duration === 0) {
     return []
   }
 
-  const trackIndex = new Map(tracks.map(t => [t.id, t]))
-  const speakerWindows = new Map<string, SpeakerWindow[]>()
-  const speakerDurations = new Map<string, number>()
-  const windowCoverageCache = new Map<string, number>()
+  const frameInterval = 1 / sampleFps
+  const expectedFrames = Math.ceil(duration * sampleFps)
+  const tempDir = path.join(process.cwd(), 'tmp', `frames_${Date.now()}`)
 
-  for (const sw of s)
-  {
-    if (sw.end <= sw.start)
-    {
-      continue
-    }
+  fs.mkdirSync(tempDir, { recursive: true })
 
-    if (!speakerWindows.has(sw.speakerId))
-    {
-      speakerWindows.set(sw.speakerId, [])
-      speakerDurations.set(sw.speakerId, 0)
-    }
+  try {
+    await extractFrames(videoPath, segStart, duration, sampleFps, tempDir)
 
-    speakerWindows.get(sw.speakerId)!.push(sw)
-    speakerDurations.set(sw.speakerId, (speakerDurations.get(sw.speakerId) ?? 0) + (sw.end - sw.start))
-  }
+    const frameFiles = fs
+      .readdirSync(tempDir)
+      .filter((file) => file.endsWith('.jpg'))
+      .sort()
 
-  const coverageBySpeaker = new Map<string, Map<string, number>>()
+    const snapshots: FaceSnapshot[] = []
 
-  for (const [speakerId, windows] of speakerWindows)
-  {
-    const totals = new Map<string, number>()
+    for (let i = 0; i < frameFiles.length && i < expectedFrames; i++) {
+      const framePath = path.join(tempDir, frameFiles[i])
+      const buffer = fs.readFileSync(framePath)
+      const tensor = tf.node.decodeImage(buffer, 3) as tf.Tensor3D
 
-    for (const sw of windows)
-    {
-      for (const track of tracks)
-      {
-        const coverage = getTrackCoverageForWindow(track, sw.start, sw.end, windowCoverageCache)
+      try {
+        const timestamp = segStart + i * frameInterval
+        const detections = await faceapi
+          .detectAllFaces(
+            tensor as unknown as faceapi.TNetInput,
+            new faceapi.SsdMobilenetv1Options({ minConfidence: MIN_FACE_CONFIDENCE }),
+          )
+          .withFaceLandmarks()
 
-        if (coverage > 0)
-        {
-          totals.set(track.id, (totals.get(track.id) ?? 0) + coverage)
-        }
-      }
-    }
-
-    coverageBySpeaker.set(speakerId, totals)
-  }
-
-  const speakerOrder = Array.from(speakerWindows.keys()).sort((a, b) => {
-    const da = speakerDurations.get(a) ?? 0
-    const db = speakerDurations.get(b) ?? 0
-
-    if (db !== da)
-    {
-      return db - da
-    }
-
-    return a.localeCompare(b)
-  })
-
-  const assignment = new Map<string, string>()
-  const usedTracks = new Set<string>()
-
-  for (const speakerId of speakerOrder)
-  {
-    const totals = coverageBySpeaker.get(speakerId) ?? new Map<string, number>()
-    const candidates = tracks
-      .map(track => ({ id: track.id, coverage: totals.get(track.id) ?? 0 }))
-      .sort((a, b) => {
-        if (b.coverage !== a.coverage)
-        {
-          return b.coverage - a.coverage
-        }
-
-        return a.id.localeCompare(b.id)
-      })
-
-    let chosen = candidates.find(c => !usedTracks.has(c.id) && c.coverage > 0)
-
-    if (!chosen)
-    {
-      chosen = candidates.find(c => !usedTracks.has(c.id) && c.coverage >= 0)
-    }
-
-    if (!chosen)
-    {
-      chosen = candidates[0]
-    }
-
-    if (chosen && chosen.coverage > 0)
-    {
-      assignment.set(speakerId, chosen.id)
-      usedTracks.add(chosen.id)
-    }
-  }
-
-  const out: Array<{ start: number; end: number; trackId: string }> = []
-
-  for (const sw of s)
-  {
-    if (sw.end <= sw.start)
-    {
-      continue
-    }
-
-    let trackId = assignment.get(sw.speakerId)
-
-    if (trackId)
-    {
-      const track = trackIndex.get(trackId)
-
-      if (!track)
-      {
-        trackId = undefined
-      }
-      else
-      {
-        const coverage = getTrackCoverageForWindow(track, sw.start, sw.end, windowCoverageCache)
-
-        if (coverage <= 0)
-        {
-          trackId = undefined
-        }
-      }
-    }
-
-    if (!trackId)
-    {
-      const best = tracks
-        .map(track => ({ id: track.id, coverage: getTrackCoverageForWindow(track, sw.start, sw.end, windowCoverageCache) }))
-        .filter(item => item.coverage > 0)
-        .sort((a, b) => {
-          if (b.coverage !== a.coverage)
-          {
-            return b.coverage - a.coverage
+        const scaleX = baseW / tensor.shape[1]
+        const scaleY = baseH / tensor.shape[0]
+        const boxes: FaceBox[] = detections.map((det) => {
+          const box = det.detection.box
+          return {
+            x: box.x * scaleX,
+            y: box.y * scaleY,
+            w: box.width * scaleX,
+            h: box.height * scaleY,
+            score: det.detection.score,
           }
+        })
 
-          return a.id.localeCompare(b.id)
-        })[0]
-
-      if (best)
-      {
-        trackId = best.id
+        if (boxes.length > 0) {
+          snapshots.push({ t: timestamp, boxes })
+        }
+      } finally {
+        tensor.dispose()
       }
     }
 
-    if (trackId)
-    {
-      out.push({ start: sw.start, end: sw.end, trackId })
+    return snapshots
+  } catch (err) {
+    console.error('Face detection failed:', err)
+    return []
+  } finally {
+    if (fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    }
+  }
+}
+
+function buildFaceTracks(snapshots: FaceSnapshot[]): FaceTrack[] {
+  if (snapshots.length === 0) {
+    return []
+  }
+
+  const tracks: FaceTrack[] = []
+
+  for (const snap of snapshots) {
+    const assignments = new Set<FaceTrack>()
+
+    for (const box of snap.boxes) {
+      const track = findBestTrack(tracks, assignments, snap.t, box)
+
+      if (track) {
+        track.samples.push({ t: snap.t, box: cloneBox(box) })
+        assignments.add(track)
+      } else {
+        const newTrack: FaceTrack = {
+          id: `track_${tracks.length}`,
+          samples: [{ t: snap.t, box: cloneBox(box) }],
+        }
+        tracks.push(newTrack)
+        assignments.add(newTrack)
+      }
     }
   }
 
-  return out
+  return tracks.filter((track) => track.samples.length >= MIN_TRACK_LENGTH)
 }
 
-function getTrackCoverageForWindow(track: FaceTrack, start: number, end: number, cache: Map<string, number>): number {
-  const key = `${track.id}:${start.toFixed(3)}:${end.toFixed(3)}`
+function findBestTrack(
+  tracks: FaceTrack[],
+  assignments: Set<FaceTrack>,
+  t: number,
+  box: FaceBox,
+): FaceTrack | null {
+  let best: { track: FaceTrack; score: number } | null = null
 
-  if (cache.has(key))
-  {
-    return cache.get(key) ?? 0
+  for (const track of tracks) {
+    if (assignments.has(track) || track.samples.length === 0) {
+      continue
+    }
+
+    const last = track.samples[track.samples.length - 1]
+    const dt = t - last.t
+
+    if (dt < 0 || dt > MAX_TRACK_JOIN_GAP_S) {
+      continue
+    }
+
+    const distance = centerDistance(last.box, box)
+
+    if (distance > MAX_ASSOCIATION_DISTANCE) {
+      continue
+    }
+
+    const overlap = computeIoU(last.box, box)
+    const score = overlap * 2 - distance / 300
+
+    if (!best || score > best.score) {
+      best = { track, score }
+    }
   }
 
-  const coverage = computeTrackCoverage(track, start, end)
-  cache.set(key, coverage)
-
-  return coverage
+  return best ? best.track : null
 }
 
-function computeTrackCoverage(track: FaceTrack, start: number, end: number): number {
-  if (track.boxes.length === 0 || end <= start)
-  {
+function cloneBox(box: FaceBox): FaceBox {
+  return { x: box.x, y: box.y, w: box.w, h: box.h, score: box.score }
+}
+
+function centerDistance(a: FaceBox, b: FaceBox): number {
+  const ax = a.x + a.w / 2
+  const ay = a.y + a.h / 2
+  const bx = b.x + b.w / 2
+  const by = b.y + b.h / 2
+
+  return Math.hypot(ax - bx, ay - by)
+}
+
+function computeIoU(a: FaceBox, b: FaceBox): number {
+  const left = Math.max(a.x, b.x)
+  const right = Math.min(a.x + a.w, b.x + b.w)
+  const top = Math.max(a.y, b.y)
+  const bottom = Math.min(a.y + a.h, b.y + b.h)
+
+  if (right <= left || bottom <= top) {
     return 0
   }
 
-  const fallbackStep = getSampleStepSeconds()
-  let avgDelta = fallbackStep
+  const intersection = (right - left) * (bottom - top)
+  const areaA = a.w * a.h
+  const areaB = b.w * b.h
 
-  if (track.boxes.length > 1)
-  {
-    const totalSpan = track.boxes[track.boxes.length - 1].t - track.boxes[0].t
-
-    if (isFinite(totalSpan) && totalSpan > 0)
-    {
-      avgDelta = totalSpan / (track.boxes.length - 1)
-    }
+  if (areaA <= 0 || areaB <= 0) {
+    return 0
   }
 
-  let covered = 0
+  const union = areaA + areaB - intersection
 
-  for (let i = 0; i < track.boxes.length; i++)
-  {
-    const box = track.boxes[i]
-    const segStart = Math.max(start, box.t)
-    let segEnd = end
-
-    if (i < track.boxes.length - 1)
-    {
-      segEnd = Math.min(end, track.boxes[i + 1].t)
-    }
-    else
-    {
-      segEnd = Math.min(end, box.t + avgDelta)
-    }
-
-    if (segEnd > segStart)
-    {
-      covered += segEnd - segStart
-    }
-  }
-
-  return covered
+  return union > 0 ? intersection / union : 0
 }
 
-let cachedSampleStep: number | null = null
+function getBoxAtTime(track: FaceTrack, t: number): FaceBox | null {
+  if (track.samples.length === 0) {
+    return null
+  }
 
-function getSampleStepSeconds(): number {
-  if (cachedSampleStep === null)
-  {
-    const fps = Number(process.env.FRAMING_SAMPLE_FPS || 3)
+  let previous: TrackSample | null = null
+  let next: TrackSample | null = null
 
-    if (!isFinite(fps) || fps <= 0)
-    {
-      cachedSampleStep = 1 / 3
+  for (const sample of track.samples) {
+    if (sample.t === t) {
+      return cloneBox(sample.box)
     }
-    else
-    {
-      cachedSampleStep = 1 / fps
+
+    if (sample.t < t) {
+      if (!previous || sample.t > previous.t) {
+        previous = sample
+      }
+    }
+
+    if (sample.t > t) {
+      if (!next || sample.t < next.t) {
+        next = sample
+      }
     }
   }
 
-  return cachedSampleStep
+  if (previous && next) {
+    const gap = next.t - previous.t
+
+    if (gap <= MAX_INTERP_GAP_S) {
+      const alpha = gap === 0 ? 0 : (t - previous.t) / gap
+      return {
+        x: lerp(previous.box.x, next.box.x, alpha),
+        y: lerp(previous.box.y, next.box.y, alpha),
+        w: lerp(previous.box.w, next.box.w, alpha),
+        h: lerp(previous.box.h, next.box.h, alpha),
+        score: Math.min(previous.box.score, next.box.score),
+      }
+    }
+  }
+
+  if (previous && t - previous.t <= TRACK_HOLD_S) {
+    return cloneBox(previous.box)
+  }
+
+  return null
 }
 
-let cachedTorsoMultiplier: number | null = null
-
-function getTorsoMultiplier(): number {
-  if (cachedTorsoMultiplier === null)
-  {
-    const val = parseFloat(process.env.FRAMING_TORSO_MULTIPLIER || '2.7')
-    cachedTorsoMultiplier = isNaN(val) || val <= 0 ? 2.7 : val
-  }
-  
-  return cachedTorsoMultiplier
+function lerp(a: number, b: number, alpha: number): number {
+  return a + (b - a) * alpha
 }
 
-function estimateBodyBox(faceBox: FaceBox, baseW: number, baseH: number): BodyBox | null {
-  if (!faceBox.landmarks || faceBox.landmarks.length < 68)
-  {
-    return null
-  }
-  
-  const lm = faceBox.landmarks
-  
-  const chinY = lm[8][1]
-  const eyebrowTopY = Math.min(lm[19][1], lm[24][1])
-  const headHeight = chinY - eyebrowTopY
-  
-  if (headHeight <= 0 || !isFinite(headHeight))
-  {
-    return null
-  }
-  
-  const jawLeft = lm[0]
-  const jawRight = lm[16]
-  const shoulderWidth = Math.abs(jawRight[0] - jawLeft[0]) * 1.8
-  
-  if (!isFinite(shoulderWidth) || shoulderWidth <= 0)
-  {
-    return null
-  }
-  
-  const torsoMultiplier = getTorsoMultiplier()
-  const torsoHeight = headHeight * torsoMultiplier
-  
-  const estimatedTopY = eyebrowTopY - headHeight * 0.2
-  const estimatedBottomY = Math.min(chinY + torsoHeight, baseH)
-  
-  const bodyHeight = estimatedBottomY - estimatedTopY
-  const centerX = (jawLeft[0] + jawRight[0]) / 2
-  const centerY = estimatedTopY + bodyHeight * 0.4
-  
-  if (!isFinite(centerX) || !isFinite(centerY))
-  {
-    return null
-  }
-  
-  const bodyLeft = Math.max(0, centerX - shoulderWidth / 2)
-  const bodyRight = Math.min(baseW, centerX + shoulderWidth / 2)
-  const bodyWidth = bodyRight - bodyLeft
-  
-  return {
-    x: bodyLeft,
-    y: estimatedTopY,
-    w: bodyWidth,
-    h: bodyHeight,
-    cx: centerX,
-    cy: centerY
-  }
+async function extractFrames(
+  videoPath: string,
+  segStart: number,
+  duration: number,
+  fps: number,
+  outputDir: string,
+): Promise<void> {
+  const ffmpegPath = require('ffmpeg-static')
+
+  await execFileAsync(ffmpegPath, [
+    '-ss',
+    segStart.toFixed(3),
+    '-i',
+    videoPath,
+    '-t',
+    duration.toFixed(3),
+    '-vf',
+    `fps=${fps},scale=640:-1`,
+    '-q:v',
+    '2',
+    path.join(outputDir, 'frame_%04d.jpg'),
+  ])
 }
 
-export function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: string }>, tracks: FaceTrack[], baseW: number, baseH: number, c: Constraints): CropKF[] {
-  const out: CropKF[] = []
-  const targetW = Math.floor(baseH * 9 / 16)
+function buildCropKeyframes(
+  detections: FaceSnapshot[],
+  tracks: FaceTrack[],
+  baseW: number,
+  baseH: number,
+  constraints: Constraints,
+): CropKF[] {
+  const targetW = Math.floor((baseH * 9) / 16)
   const targetH = baseH
+  const out: CropKF[] = []
 
-  for (const m of mapping)
-  {
-    const tr = tracks.find(t => t.id === m.trackId)
-    
-    if (!tr)
-    {
+  const activeTracks = tracks.filter((track) => track.samples.length > 0)
+
+  for (const snap of detections) {
+    const boxes: FaceBox[] = []
+
+    for (const track of activeTracks) {
+      const box = getBoxAtTime(track, snap.t)
+
+      if (box) {
+        boxes.push(box)
+      }
+    }
+
+    if (boxes.length === 0) {
+      boxes.push(...snap.boxes)
+    }
+
+    const bounds = computeGroupBounds(boxes)
+
+    if (!bounds) {
       continue
     }
-    
-    for (const b of tr.boxes)
-    {
-      if (b.t < m.start)
-      {
-        continue
-      }
-      
-      if (b.t > m.end)
-      {
-        break
-      }
-      
-      const bodyBox = estimateBodyBox(b, baseW, baseH)
-      
-      let cx: number
-      let cy: number
-      
-      if (bodyBox)
-      {
-        cx = bodyBox.cx
-        cy = bodyBox.cy - targetH * c.centerBiasY
-      }
-      else
-      {
-        cx = b.x + b.w / 2
-        cy = b.y + b.h * (0.5 - c.centerBiasY)
-      }
-      
-      const marginPx = Math.max(0, c.margin) * targetW
-      const minCropX = 0
-      const maxCropX = Math.max(0, baseW - targetW)
 
-      let idealX = cx - targetW / 2
-
-      if (marginPx > 0)
-      {
-        const marginMin = cx - targetW + marginPx
-        const marginMax = cx - marginPx
-        const allowedMin = Math.max(minCropX, marginMin)
-        const allowedMax = Math.min(maxCropX, marginMax)
-
-        if (allowedMin <= allowedMax)
-        {
-          if (idealX < allowedMin)
-          {
-            idealX = allowedMin
-          }
-          else if (idealX > allowedMax)
-          {
-            idealX = allowedMax
-          }
-        }
-        else if (cx < marginPx)
-        {
-          idealX = minCropX
-        }
-        else if (baseW - cx < marginPx)
-        {
-          idealX = maxCropX
-        }
-      }
-
-      let x = Math.round(idealX)
-
-      if (marginPx > 0)
-      {
-        const allowedMin = Math.max(minCropX, Math.ceil(cx - targetW + marginPx))
-        const allowedMax = Math.min(maxCropX, Math.floor(cx - marginPx))
-
-        if (allowedMin <= allowedMax)
-        {
-          if (x < allowedMin)
-          {
-            x = allowedMin
-          }
-          else if (x > allowedMax)
-          {
-            x = allowedMax
-          }
-        }
-      }
-
-      x = Math.max(minCropX, Math.min(x, maxCropX))
-      let y = Math.round(cy - targetH / 2)
-
-      const safeTop = Math.round(targetH * c.safeTop)
-      const safeBottom = Math.round(targetH * c.safeBottom)
-
-      y = Math.max(-safeTop, Math.min(y, baseH - targetH + safeBottom))
-      
-      out.push({ t: b.t, x, y, w: targetW, h: targetH })
-    }
+    const crop = computeCropFromBounds(bounds, targetW, targetH, baseW, baseH, constraints)
+    out.push({ t: snap.t, ...crop })
   }
-  
-  return dedupeByTime(out, 0.1)
+
+  return out
 }
 
-function applyHorizontalMargin(cx: number, targetW: number, baseW: number, marginRatio: number): number {
-  const raw = cx - targetW / 2
-  const clampedRaw = Math.max(0, Math.min(raw, baseW - targetW))
+type GroupBounds = {
+  minX: number
+  maxX: number
+  minY: number
+  maxY: number
+}
 
-  if (marginRatio <= 0)
-  {
-    return Math.round(clampedRaw)
+function computeGroupBounds(boxes: FaceBox[]): GroupBounds | null {
+  if (boxes.length === 0) {
+    return null
   }
 
-  const marginPx = Math.max(0, Math.min(Math.round(targetW * marginRatio), Math.floor(targetW / 2)))
+  let minX = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
 
-  if (marginPx === 0)
-  {
-    return Math.round(clampedRaw)
+  for (const box of boxes) {
+    minX = Math.min(minX, box.x)
+    maxX = Math.max(maxX, box.x + box.w)
+    minY = Math.min(minY, box.y)
+    maxY = Math.max(maxY, box.y + box.h)
   }
 
-  const feasibleMin = cx - (targetW - marginPx)
-  const feasibleMax = cx - marginPx
-  const clipMin = Math.max(0, Math.ceil(feasibleMin))
-  const clipMax = Math.min(baseW - targetW, Math.floor(feasibleMax))
+  if (!isFinite(minX) || !isFinite(maxX) || !isFinite(minY) || !isFinite(maxY)) {
+    return null
+  }
 
-  if (clipMin <= clipMax)
-  {
-    const desired = Math.round(raw)
+  return { minX, maxX, minY, maxY }
+}
 
-    if (desired < clipMin)
-    {
-      return clipMin
+function computeCropFromBounds(
+  bounds: GroupBounds,
+  targetW: number,
+  targetH: number,
+  baseW: number,
+  baseH: number,
+  constraints: Constraints,
+): { x: number; y: number; w: number; h: number } {
+  const marginPx = Math.max(0, constraints.margin) * targetW
+
+  const paddedMinX = Math.max(0, bounds.minX - marginPx)
+  const paddedMaxX = Math.min(baseW, bounds.maxX + marginPx)
+  const paddedMinY = Math.max(0, bounds.minY - marginPx)
+  const paddedMaxY = Math.min(baseH, bounds.maxY + marginPx)
+
+  const desiredCenterX = (paddedMinX + paddedMaxX) / 2
+  const desiredCenterY = (paddedMinY + paddedMaxY) / 2 - targetH * constraints.centerBiasY
+
+  const paddedWidth = paddedMaxX - paddedMinX
+  let x: number
+
+  if (paddedWidth <= targetW) {
+    const feasibleMinX = Math.max(0, Math.min(baseW - targetW, paddedMaxX - targetW))
+    const feasibleMaxX = Math.min(baseW - targetW, Math.max(0, paddedMinX))
+    const ideal = desiredCenterX - targetW / 2
+
+    if (feasibleMinX <= feasibleMaxX) {
+      x = clamp(ideal, feasibleMinX, feasibleMaxX)
+    } else {
+      x = clamp(ideal, 0, baseW - targetW)
+    }
+  } else {
+    const ideal = desiredCenterX - targetW / 2
+    x = clamp(ideal, 0, baseW - targetW)
+  }
+
+  const rawY = desiredCenterY - targetH / 2
+  const safeTop = -Math.round(targetH * constraints.safeTop)
+  const safeBottom = Math.round(targetH * constraints.safeBottom)
+  const minY = safeTop
+  const maxY = baseH - targetH + safeBottom
+  const y = clamp(rawY, minY, maxY)
+
+  return { x: Math.round(x), y: Math.round(y), w: targetW, h: targetH }
+}
+
+function smoothKeyframes(kf: CropKF[]): CropKF[] {
+  if (kf.length < 2) {
+    return kf
+  }
+
+  const windowSize = 2
+  const smoothed: CropKF[] = []
+
+  for (let i = 0; i < kf.length; i++) {
+    let sumX = 0
+    let sumY = 0
+    let count = 0
+
+    for (let j = i - windowSize; j <= i + windowSize; j++) {
+      if (j < 0 || j >= kf.length) {
+        continue
+      }
+
+      sumX += kf[j].x
+      sumY += kf[j].y
+      count += 1
     }
 
-    if (desired > clipMax)
-    {
-      return clipMax
-    }
-
-    return desired
+    smoothed.push({
+      t: kf[i].t,
+      x: Math.round(sumX / count),
+      y: Math.round(sumY / count),
+      w: kf[i].w,
+      h: kf[i].h,
+    })
   }
 
-  return Math.round(clampedRaw)
+  return smoothed
+}
+
+function applyPanLimits(kf: CropKF[], maxPanPerSecond: number): CropKF[] {
+  if (kf.length < 2) {
+    return kf
+  }
+
+  const limited: CropKF[] = [kf[0]]
+
+  for (let i = 1; i < kf.length; i++) {
+    const prev = limited[limited.length - 1]
+    const cur = kf[i]
+    const dt = Math.max(0.001, cur.t - prev.t)
+    const maxDelta = Math.max(0, maxPanPerSecond) * dt
+
+    const nextX = stepToward(prev.x, cur.x, maxDelta)
+    const nextY = stepToward(prev.y, cur.y, maxDelta)
+
+    limited.push({ t: cur.t, x: nextX, y: nextY, w: cur.w, h: cur.h })
+  }
+
+  return limited
+}
+
+function easeSegmentEdges(
+  kf: CropKF[],
+  segStart: number,
+  segEnd: number,
+  easeSeconds: number,
+): CropKF[] {
+  if (kf.length === 0 || easeSeconds <= 0) {
+    return kf
+  }
+
+  const eased: CropKF[] = []
+
+  for (const frame of kf) {
+    const fromStart = Math.min(1, Math.max(0, (frame.t - segStart) / easeSeconds))
+    const fromEnd = Math.min(1, Math.max(0, (segEnd - frame.t) / easeSeconds))
+    const influence = Math.min(fromStart, fromEnd)
+
+    if (eased.length === 0) {
+      eased.push(frame)
+      continue
+    }
+
+    const prev = eased[eased.length - 1]
+    const x = Math.round(prev.x + (frame.x - prev.x) * influence)
+    const y = Math.round(prev.y + (frame.y - prev.y) * influence)
+    eased.push({ t: frame.t, x, y, w: frame.w, h: frame.h })
+  }
+
+  return eased
 }
 
 function dedupeByTime(kf: CropKF[], minDelta: number): CropKF[] {
-  if (kf.length === 0)
-  {
+  if (kf.length === 0) {
     return kf
   }
-  
+
   const out: CropKF[] = [kf[0]]
-  
-  for (let i = 1; i < kf.length; i++)
-  {
-    if (kf[i].t - out[out.length - 1].t >= minDelta)
-    {
+
+  for (let i = 1; i < kf.length; i++) {
+    if (kf[i].t - out[out.length - 1].t >= minDelta) {
       out.push(kf[i])
     }
   }
-  
+
   return out
 }
 
-function smoothAndConstrain(kf: CropKF[], baseW: number, baseH: number, segStart: number, segEnd: number, c: Constraints): CropKF[] {
-  if (kf.length === 0)
-  {
-    return kf
+function stepToward(current: number, target: number, maxDelta: number): number {
+  if (Math.abs(target - current) <= maxDelta) {
+    return target
   }
-  
-  const win = 3
-  const sm: CropKF[] = []
-  
-  for (let i = 0; i < kf.length; i++)
-  {
-    let sx = 0
-    let sy = 0
-    let n = 0
-    
-    for (let j = Math.max(0, i - win); j <= Math.min(kf.length - 1, i + win); j++)
-    {
-      sx += kf[j].x
-      sy += kf[j].y
-      n += 1
-    }
-    
-    const x = Math.round(sx / n)
-    const y = Math.round(sy / n)
-    sm.push({ t: kf[i].t, x, y, w: kf[i].w, h: kf[i].h })
-  }
-  
-  const out: CropKF[] = [sm[0]]
-  
-  for (let i = 1; i < sm.length; i++)
-  {
-    const dt = Math.max(0.001, sm[i].t - sm[i - 1].t)
-    const dx = sm[i].x - out[out.length - 1].x
-    const dy = sm[i].y - out[out.length - 1].y
-    const maxStep = Math.round(c.maxPan * dt)
-    const nx = stepLimit(out[out.length - 1].x, sm[i].x, maxStep)
-    const ny = stepLimit(out[out.length - 1].y, sm[i].y, maxStep)
-    out.push({ t: sm[i].t, x: nx, y: ny, w: sm[i].w, h: sm[i].h })
-  }
-  
-  return easeSpeakerEdges(out, segStart, segEnd, c.easeMs / 1000)
+
+  return target > current ? current + maxDelta : current - maxDelta
 }
 
-function stepLimit(a: number, b: number, m: number): number {
-  if (Math.abs(b - a) <= m)
-  {
-    return b
+function clamp(value: number, min: number, max: number): number {
+  if (value < min) {
+    return min
   }
-  
-  if (b > a)
-  {
-    return a + m
-  }
-  
-  return a - m
-}
 
-function easeSpeakerEdges(kf: CropKF[], segStart: number, segEnd: number, easeS: number): CropKF[] {
-  if (kf.length < 2)
-  {
-    return kf
+  if (value > max) {
+    return max
   }
-  
-  const out: CropKF[] = [kf[0]]
-  
-  for (let i = 1; i < kf.length; i++)
-  {
-    const t = kf[i].t
-    const p = out[out.length - 1]
-    const fromStart = Math.min(1, Math.max(0, (t - segStart) / easeS))
-    const fromEnd = Math.min(1, Math.max(0, (segEnd - t) / easeS))
-    const alpha = Math.min(fromStart, fromEnd)
-    const x = Math.round(p.x + (kf[i].x - p.x) * alpha)
-    const y = Math.round(p.y + (kf[i].y - p.y) * alpha)
-    out.push({ t, x, y, w: kf[i].w, h: kf[i].h })
-  }
-  
-  return out
+
+  return value
 }
 
 export function buildPiecewiseExpr(kf: CropKF[], key: 'x' | 'y'): string {
-  if (kf.length === 0)
-  {
+  if (kf.length === 0) {
     return '0'
   }
-  
+
   const parts: string[] = []
-  
   const firstVal = key === 'x' ? kf[0].x : kf[0].y
   parts.push(`lt(t,${kf[0].t.toFixed(3)})*${firstVal.toFixed(0)}`)
-  
-  for (let i = 0; i < kf.length - 1; i++)
-  {
+
+  for (let i = 0; i < kf.length - 1; i++) {
     const a = kf[i]
     const b = kf[i + 1]
     const ta = a.t
@@ -887,20 +655,23 @@ export function buildPiecewiseExpr(kf: CropKF[], key: 'x' | 'y'): string {
     const va = key === 'x' ? a.x : a.y
     const vb = key === 'x' ? b.x : b.y
     const slope = (vb - va) / Math.max(0.001, tb - ta)
-    const expr = `between(t,${ta.toFixed(3)},${tb.toFixed(3)})*(${va.toFixed(0)}+(${slope.toFixed(6)})*(t-${ta.toFixed(3)}))`
-    parts.push(expr)
+    parts.push(
+      `between(t,${ta.toFixed(3)},${tb.toFixed(3)})*(${va.toFixed(0)}+(${slope.toFixed(6)})*(t-${ta.toFixed(3)}))`,
+    )
   }
-  
-  const last = key === 'x' ? kf[kf.length - 1].x : kf[kf.length - 1].y
-  parts.push(`gte(t,${kf[kf.length - 1].t.toFixed(3)})*${last.toFixed(0)}`)
-  
+
+  const lastVal = key === 'x' ? kf[kf.length - 1].x : kf[kf.length - 1].y
+  parts.push(`gte(t,${kf[kf.length - 1].t.toFixed(3)})*${lastVal.toFixed(0)}`)
+
   return parts.join('+')
 }
 
 export const __testables = {
-  mapSpeakersToTracks,
-  buildKeyframes,
-  applyHorizontalMargin,
-  getTrackCoverageForWindow,
-  computeTrackCoverage
+  buildFaceTracks,
+  getBoxAtTime,
+  computeGroupBounds,
+  computeCropFromBounds,
+  smoothKeyframes,
+  applyPanLimits,
+  dedupeByTime,
 }
