@@ -616,6 +616,69 @@ function estimateBodyBox(faceBox: FaceBox, baseW: number, baseH: number): BodyBo
   }
 }
 
+function findBoxNearTime(boxes: FaceBox[], time: number, tolerance: number): FaceBox | null {
+  let best: FaceBox | null = null
+  let bestDelta = Infinity
+
+  for (const box of boxes)
+  {
+    const delta = Math.abs(box.t - time)
+
+    if (delta <= tolerance && delta < bestDelta)
+    {
+      best = box
+      bestDelta = delta
+    }
+  }
+
+  return best
+}
+
+function computeGroupBounds(
+  tracks: FaceTrack[],
+  time: number,
+  baseW: number,
+  baseH: number,
+): { minX: number; maxX: number } | null {
+  const tolerance = Math.max(0.1, getSampleStepSeconds())
+  let minX = Infinity
+  let maxX = -Infinity
+  let count = 0
+
+  for (const track of tracks)
+  {
+    const candidate = findBoxNearTime(track.boxes, time, tolerance)
+
+    if (!candidate)
+    {
+      continue
+    }
+
+    const body = estimateBodyBox(candidate, baseW, baseH)
+    const left = body ? body.x : candidate.x
+    const right = body ? body.x + body.w : candidate.x + candidate.w
+
+    minX = Math.min(minX, left)
+    maxX = Math.max(maxX, right)
+    count += 1
+  }
+
+  if (!isFinite(minX) || !isFinite(maxX) || count <= 1)
+  {
+    return null
+  }
+
+  minX = Math.max(0, minX)
+  maxX = Math.min(baseW, maxX)
+
+  if (maxX <= minX)
+  {
+    return null
+  }
+
+  return { minX, maxX }
+}
+
 export function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: string }>, tracks: FaceTrack[], baseW: number, baseH: number, c: Constraints): CropKF[] {
   const out: CropKF[] = []
   const targetW = Math.floor(baseH * 9 / 16)
@@ -663,6 +726,28 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
       const maxCropX = Math.max(0, baseW - targetW)
 
       let idealX = cx - targetW / 2
+
+      const groupBounds = computeGroupBounds(tracks, b.t, baseW, baseH)
+
+      if (groupBounds)
+      {
+        const span = groupBounds.maxX - groupBounds.minX
+        const groupCenter = groupBounds.minX + span / 2
+        let groupX = groupCenter - targetW / 2
+
+        if (span <= targetW)
+        {
+          const minGroupX = Math.max(minCropX, Math.ceil(groupBounds.maxX - targetW))
+          const maxGroupX = Math.min(maxCropX, Math.floor(groupBounds.minX))
+
+          if (minGroupX <= maxGroupX)
+          {
+            groupX = Math.min(Math.max(groupX, minGroupX), maxGroupX)
+          }
+        }
+
+        idealX = Math.max(minCropX, Math.min(groupX, maxCropX))
+      }
 
       if (marginPx > 0)
       {
@@ -713,6 +798,36 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
       }
 
       x = Math.max(minCropX, Math.min(x, maxCropX))
+
+      if (groupBounds)
+      {
+        const span = groupBounds.maxX - groupBounds.minX
+
+        if (span <= targetW)
+        {
+          const minGroupX = Math.max(minCropX, Math.ceil(groupBounds.maxX - targetW))
+          const maxGroupX = Math.min(maxCropX, Math.floor(groupBounds.minX))
+
+          if (minGroupX <= maxGroupX)
+          {
+            if (x < minGroupX)
+            {
+              x = minGroupX
+            }
+            else if (x > maxGroupX)
+            {
+              x = maxGroupX
+            }
+          }
+        }
+        else
+        {
+          const centerX = groupBounds.minX + span / 2
+          const centered = Math.round(centerX - targetW / 2)
+          x = Math.max(minCropX, Math.min(centered, maxCropX))
+        }
+      }
+
       let y = Math.round(cy - targetH / 2)
 
       const safeTop = Math.round(targetH * c.safeTop)
