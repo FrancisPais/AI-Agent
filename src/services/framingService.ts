@@ -616,6 +616,142 @@ function estimateBodyBox(faceBox: FaceBox, baseW: number, baseH: number): BodyBo
   }
 }
 
+function findBoxNearTime(boxes: FaceBox[], time: number, tolerance: number): FaceBox | null {
+  let best: FaceBox | null = null
+  let bestDelta = Infinity
+
+  for (const box of boxes)
+  {
+    const delta = Math.abs(box.t - time)
+
+    if (delta <= tolerance && delta < bestDelta)
+    {
+      best = box
+      bestDelta = delta
+    }
+  }
+
+  return best
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (value < min)
+  {
+    return min
+  }
+
+  if (value > max)
+  {
+    return max
+  }
+
+  return value
+}
+
+function enforceGroupBounds(
+  desiredX: number,
+  targetW: number,
+  baseW: number,
+  bounds: { minX: number; maxX: number } | null,
+): number {
+  const minCropX = 0
+  const maxCropX = Math.max(0, baseW - targetW)
+  const normalize = (value: number) => {
+    const clamped = clamp(value, minCropX, maxCropX)
+
+    if (Number.isInteger(desiredX))
+    {
+      return Math.round(clamped)
+    }
+
+    return clamped
+  }
+
+  if (!bounds)
+  {
+    return normalize(desiredX)
+  }
+
+  const span = bounds.maxX - bounds.minX
+
+  if (span <= 0)
+  {
+    return normalize(desiredX)
+  }
+
+  if (span >= targetW)
+  {
+    const centered = bounds.minX + span / 2 - targetW / 2
+    return normalize(centered)
+  }
+
+  const minAllowed = clamp(bounds.maxX - targetW, minCropX, maxCropX)
+  const maxAllowed = clamp(bounds.minX, minCropX, maxCropX)
+
+  if (minAllowed <= maxAllowed)
+  {
+    if (desiredX < minAllowed)
+    {
+      return normalize(minAllowed)
+    }
+
+    if (desiredX > maxAllowed)
+    {
+      return normalize(maxAllowed)
+    }
+
+    return normalize(desiredX)
+  }
+
+  const fallback = bounds.minX + span / 2 - targetW / 2
+  return normalize(fallback)
+}
+
+function computeGroupBounds(
+  tracks: FaceTrack[],
+  time: number,
+  baseW: number,
+  baseH: number,
+): { minX: number; maxX: number } | null {
+  const tolerance = Math.max(0.1, getSampleStepSeconds())
+  let minX = Infinity
+  let maxX = -Infinity
+  let count = 0
+
+  for (const track of tracks)
+  {
+    const candidate = findBoxNearTime(track.boxes, time, tolerance)
+
+    if (!candidate)
+    {
+      continue
+    }
+
+    const body = estimateBodyBox(candidate, baseW, baseH)
+    const left = body ? body.x : candidate.x
+    const right = body ? body.x + body.w : candidate.x + candidate.w
+
+    minX = Math.min(minX, left)
+    maxX = Math.max(maxX, right)
+    count += 1
+  }
+
+  if (!isFinite(minX) || !isFinite(maxX) || count <= 1)
+  {
+    return null
+  }
+
+  minX = Math.max(0, minX)
+  maxX = Math.min(baseW, maxX)
+
+  if (maxX <= minX)
+  {
+    return null
+  }
+
+  return { minX, maxX }
+}
+
 export function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: string }>, tracks: FaceTrack[], baseW: number, baseH: number, c: Constraints): CropKF[] {
   const out: CropKF[] = []
   const targetW = Math.floor(baseH * 9 / 16)
@@ -664,6 +800,8 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
 
       let idealX = cx - targetW / 2
 
+      const groupBounds = computeGroupBounds(tracks, b.t, baseW, baseH)
+
       if (marginPx > 0)
       {
         const marginMin = cx - targetW + marginPx
@@ -692,6 +830,8 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
         }
       }
 
+      idealX = enforceGroupBounds(idealX, targetW, baseW, groupBounds)
+
       let x = Math.round(idealX)
 
       if (marginPx > 0)
@@ -712,7 +852,9 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
         }
       }
 
+      x = enforceGroupBounds(x, targetW, baseW, groupBounds)
       x = Math.max(minCropX, Math.min(x, maxCropX))
+
       let y = Math.round(cy - targetH / 2)
 
       const safeTop = Math.round(targetH * c.safeTop)
