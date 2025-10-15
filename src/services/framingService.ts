@@ -314,41 +314,239 @@ function buildFaceTracks(detections: Array<{ t: number; faces: faceapi.WithFaceL
 }
 
 function mapSpeakersToTracks(s: SpeakerWindow[], tracks: FaceTrack[]): Array<{ start: number; end: number; trackId: string }> {
-  const out: Array<{ start: number; end: number; trackId: string }> = []
-  
+  if (s.length === 0 || tracks.length === 0)
+  {
+    return []
+  }
+
+  const trackIndex = new Map(tracks.map(t => [t.id, t]))
+  const speakerWindows = new Map<string, SpeakerWindow[]>()
+  const speakerDurations = new Map<string, number>()
+  const windowCoverageCache = new Map<string, number>()
+
   for (const sw of s)
   {
-    let best = null as { id: string; overlap: number } | null
-    
-    for (const t of tracks)
+    if (sw.end <= sw.start)
     {
-      const ov = overlapSeconds(sw.start, sw.end, t.boxes[0]?.t ?? 0, t.boxes[t.boxes.length - 1]?.t ?? 0)
-      
-      if (!best || ov > best.overlap)
+      continue
+    }
+
+    if (!speakerWindows.has(sw.speakerId))
+    {
+      speakerWindows.set(sw.speakerId, [])
+      speakerDurations.set(sw.speakerId, 0)
+    }
+
+    speakerWindows.get(sw.speakerId)!.push(sw)
+    speakerDurations.set(sw.speakerId, (speakerDurations.get(sw.speakerId) ?? 0) + (sw.end - sw.start))
+  }
+
+  const coverageBySpeaker = new Map<string, Map<string, number>>()
+
+  for (const [speakerId, windows] of speakerWindows)
+  {
+    const totals = new Map<string, number>()
+
+    for (const sw of windows)
+    {
+      for (const track of tracks)
       {
-        best = { id: t.id, overlap: ov }
+        const coverage = getTrackCoverageForWindow(track, sw.start, sw.end, windowCoverageCache)
+
+        if (coverage > 0)
+        {
+          totals.set(track.id, (totals.get(track.id) ?? 0) + coverage)
+        }
       }
     }
-    
-    if (best && best.overlap > 0)
+
+    coverageBySpeaker.set(speakerId, totals)
+  }
+
+  const speakerOrder = Array.from(speakerWindows.keys()).sort((a, b) => {
+    const da = speakerDurations.get(a) ?? 0
+    const db = speakerDurations.get(b) ?? 0
+
+    if (db !== da)
     {
-      out.push({ start: sw.start, end: sw.end, trackId: best.id })
+      return db - da
+    }
+
+    return a.localeCompare(b)
+  })
+
+  const assignment = new Map<string, string>()
+  const usedTracks = new Set<string>()
+
+  for (const speakerId of speakerOrder)
+  {
+    const totals = coverageBySpeaker.get(speakerId) ?? new Map<string, number>()
+    const candidates = tracks
+      .map(track => ({ id: track.id, coverage: totals.get(track.id) ?? 0 }))
+      .sort((a, b) => {
+        if (b.coverage !== a.coverage)
+        {
+          return b.coverage - a.coverage
+        }
+
+        return a.id.localeCompare(b.id)
+      })
+
+    let chosen = candidates.find(c => !usedTracks.has(c.id) && c.coverage > 0)
+
+    if (!chosen)
+    {
+      chosen = candidates.find(c => !usedTracks.has(c.id) && c.coverage >= 0)
+    }
+
+    if (!chosen)
+    {
+      chosen = candidates[0]
+    }
+
+    if (chosen && chosen.coverage > 0)
+    {
+      assignment.set(speakerId, chosen.id)
+      usedTracks.add(chosen.id)
     }
   }
-  
+
+  const out: Array<{ start: number; end: number; trackId: string }> = []
+
+  for (const sw of s)
+  {
+    if (sw.end <= sw.start)
+    {
+      continue
+    }
+
+    let trackId = assignment.get(sw.speakerId)
+
+    if (trackId)
+    {
+      const track = trackIndex.get(trackId)
+
+      if (!track)
+      {
+        trackId = undefined
+      }
+      else
+      {
+        const coverage = getTrackCoverageForWindow(track, sw.start, sw.end, windowCoverageCache)
+
+        if (coverage <= 0)
+        {
+          trackId = undefined
+        }
+      }
+    }
+
+    if (!trackId)
+    {
+      const best = tracks
+        .map(track => ({ id: track.id, coverage: getTrackCoverageForWindow(track, sw.start, sw.end, windowCoverageCache) }))
+        .filter(item => item.coverage > 0)
+        .sort((a, b) => {
+          if (b.coverage !== a.coverage)
+          {
+            return b.coverage - a.coverage
+          }
+
+          return a.id.localeCompare(b.id)
+        })[0]
+
+      if (best)
+      {
+        trackId = best.id
+      }
+    }
+
+    if (trackId)
+    {
+      out.push({ start: sw.start, end: sw.end, trackId })
+    }
+  }
+
   return out
 }
 
-function overlapSeconds(a: number, b: number, c: number, d: number): number {
-  const x = Math.max(a, c)
-  const y = Math.min(b, d)
-  
-  if (y <= x)
+function getTrackCoverageForWindow(track: FaceTrack, start: number, end: number, cache: Map<string, number>): number {
+  const key = `${track.id}:${start.toFixed(3)}:${end.toFixed(3)}`
+
+  if (cache.has(key))
+  {
+    return cache.get(key) ?? 0
+  }
+
+  const coverage = computeTrackCoverage(track, start, end)
+  cache.set(key, coverage)
+
+  return coverage
+}
+
+function computeTrackCoverage(track: FaceTrack, start: number, end: number): number {
+  if (track.boxes.length === 0 || end <= start)
   {
     return 0
   }
-  
-  return y - x
+
+  const fallbackStep = getSampleStepSeconds()
+  let avgDelta = fallbackStep
+
+  if (track.boxes.length > 1)
+  {
+    const totalSpan = track.boxes[track.boxes.length - 1].t - track.boxes[0].t
+
+    if (isFinite(totalSpan) && totalSpan > 0)
+    {
+      avgDelta = totalSpan / (track.boxes.length - 1)
+    }
+  }
+
+  let covered = 0
+
+  for (let i = 0; i < track.boxes.length; i++)
+  {
+    const box = track.boxes[i]
+    const segStart = Math.max(start, box.t)
+    let segEnd = end
+
+    if (i < track.boxes.length - 1)
+    {
+      segEnd = Math.min(end, track.boxes[i + 1].t)
+    }
+    else
+    {
+      segEnd = Math.min(end, box.t + avgDelta)
+    }
+
+    if (segEnd > segStart)
+    {
+      covered += segEnd - segStart
+    }
+  }
+
+  return covered
+}
+
+let cachedSampleStep: number | null = null
+
+function getSampleStepSeconds(): number {
+  if (cachedSampleStep === null)
+  {
+    const fps = Number(process.env.FRAMING_SAMPLE_FPS || 3)
+
+    if (!isFinite(fps) || fps <= 0)
+    {
+      cachedSampleStep = 1 / 3
+    }
+    else
+    {
+      cachedSampleStep = 1 / fps
+    }
+  }
+
+  return cachedSampleStep
 }
 
 let cachedTorsoMultiplier: number | null = null
@@ -529,6 +727,47 @@ export function buildKeyframes(mapping: Array<{ start: number; end: number; trac
   return dedupeByTime(out, 0.1)
 }
 
+function applyHorizontalMargin(cx: number, targetW: number, baseW: number, marginRatio: number): number {
+  const raw = cx - targetW / 2
+  const clampedRaw = Math.max(0, Math.min(raw, baseW - targetW))
+
+  if (marginRatio <= 0)
+  {
+    return Math.round(clampedRaw)
+  }
+
+  const marginPx = Math.max(0, Math.min(Math.round(targetW * marginRatio), Math.floor(targetW / 2)))
+
+  if (marginPx === 0)
+  {
+    return Math.round(clampedRaw)
+  }
+
+  const feasibleMin = cx - (targetW - marginPx)
+  const feasibleMax = cx - marginPx
+  const clipMin = Math.max(0, Math.ceil(feasibleMin))
+  const clipMax = Math.min(baseW - targetW, Math.floor(feasibleMax))
+
+  if (clipMin <= clipMax)
+  {
+    const desired = Math.round(raw)
+
+    if (desired < clipMin)
+    {
+      return clipMin
+    }
+
+    if (desired > clipMax)
+    {
+      return clipMax
+    }
+
+    return desired
+  }
+
+  return Math.round(clampedRaw)
+}
+
 function dedupeByTime(kf: CropKF[], minDelta: number): CropKF[] {
   if (kf.length === 0)
   {
@@ -656,4 +895,12 @@ export function buildPiecewiseExpr(kf: CropKF[], key: 'x' | 'y'): string {
   parts.push(`gte(t,${kf[kf.length - 1].t.toFixed(3)})*${last.toFixed(0)}`)
   
   return parts.join('+')
+}
+
+export const __testables = {
+  mapSpeakersToTracks,
+  buildKeyframes,
+  applyHorizontalMargin,
+  getTrackCoverageForWindow,
+  computeTrackCoverage
 }
