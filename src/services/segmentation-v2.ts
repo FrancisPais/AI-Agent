@@ -32,6 +32,10 @@ export interface SegmentFeatures {
   hasNumbers: boolean
   sceneChangeCount: number
   wordCount: number
+  coherenceScore: number
+  closureScore: number
+  arcScore: number
+  semanticDensity: number
 }
 
 export interface CommentHotspot {
@@ -171,19 +175,47 @@ function analyzeSpeechDynamics(words: TranscriptWord[], startSec: number): { rat
   return { rate, pauseDensity, energy }
 }
 
+const STOP_WORDS = new Set([
+  'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am', 'an', 'and', 'any', 'are', "aren't", 'as', 'at',
+  'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by',
+  'could', "couldn't",
+  'did', "didn't", 'do', 'does', "doesn't", 'doing', "don't", 'down', 'during',
+  'each', 'few', 'for', 'from', 'further',
+  'had', "hadn't", 'has', "hasn't", 'have', "haven't", 'having', 'he', "he'd", "he'll", "he's", 'her', 'here', "here's",
+  'hers', 'herself', 'him', 'himself', 'his', 'how', "how's",
+  'i', "i'd", "i'll", "i'm", "i've", 'if', 'in', 'into', 'is', "isn't", 'it', "it's", 'its', 'itself',
+  "let's",
+  'me', 'more', 'most', "mustn't", 'my', 'myself',
+  'no', 'nor', 'not',
+  'of', 'off', 'on', 'once', 'only', 'or', 'other', 'ought', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+  'same', "shan't", 'she', "she'd", "she'll", "she's", 'should', "shouldn't", 'so', 'some', 'such',
+  'than', 'that', "that's", 'the', 'their', 'theirs', 'them', 'themselves', 'then', 'there', "there's", 'these', 'they',
+  "they'd", "they'll", "they're", "they've", 'this', 'those', 'through', 'to', 'too',
+  'under', 'until', 'up',
+  'very',
+  'was', "wasn't", 'we', "we'd", "we'll", "we're", "we've", 'were', "weren't", 'what', "what's", 'when', "when's", 'where',
+  "where's", 'which', 'while', 'who', "who's", 'whom', 'why', "why's", 'with', "won't", 'would', "wouldn't",
+  'you', "you'd", "you'll", "you're", "you've", 'your', 'yours', 'yourself', 'yourselves'
+])
+
 function calculateSegmentFeatures(
-  words: TranscriptWord[], 
-  startSec: number, 
+  words: TranscriptWord[],
+  startSec: number,
   endSec: number,
   sceneChanges: SceneChange[],
   hotspots: number[]
 ): SegmentFeatures {
   const text = words.map(w => w.word).join(' ')
   const hook = words.filter(w => w.start - startSec < 3).map(w => w.word).join(' ').trim()
-  
+
+  const lowerWords = words.map(w => w.word.toLowerCase())
+  const cleanedWords = lowerWords.map(w => w.replace(/[^a-z0-9']/gi, ''))
+  const contentWords = cleanedWords.filter(w => w.length > 2 && !STOP_WORDS.has(w))
+  const semanticDensity = Math.min(1, contentWords.length / Math.max(1, words.length))
+
   const { hasQuestion, hasBoldClaim, hasNumbers } = detectHookPatterns(hook || text.substring(0, 100))
   const dynamics = analyzeSpeechDynamics(words, startSec)
-  
+
   const sceneChangesInSegment = sceneChanges.filter(s => s.timeSec >= startSec && s.timeSec <= endSec).length
   
   let hookScore = 0.5
@@ -199,20 +231,84 @@ function calculateSegmentFeatures(
   if (dynamics.pauseDensity < 0.2) retentionScore += 0.15
   if (sceneChangesInSegment >= 2 && sceneChangesInSegment <= 4) retentionScore += 0.15
   retentionScore = Math.min(1, retentionScore)
-  
+
   const fillerWords = words.filter(w => /^(um|uh|like|you know|sort of|kind of)$/i.test(w.word.trim())).length
-  const clarityScore = Math.max(0, 1 - (fillerWords / Math.max(1, words.length)) * 2)
-  
+  const fillerRatio = fillerWords / Math.max(1, words.length)
+  const clarityScore = Math.max(0, 1 - fillerRatio * 2)
+
   const visualScore = sceneChangesInSegment >= 1 && sceneChangesInSegment <= 6 ? 0.8 : 0.5
-  
+
   const noveltyScore = 0.6
-  
+
   const nearHotspot = hotspots.some(h => Math.abs(h - startSec) < 30)
   const engagementScore = nearHotspot ? 0.8 : 0.4
-  
+
   const profanityPattern = /\b(fuck|shit|damn|hell|ass|bitch)\b/i
   const safetyScore = profanityPattern.test(text) ? 0.3 : 0.9
-  
+
+  const sentenceEnders = text.match(/[.!?]/g)?.length ?? 0
+  const sentences = Math.max(1, sentenceEnders || Math.ceil((endSec - startSec) / 7))
+  const avgWordsPerSentence = words.length / sentences
+
+  let coherenceScore = 0.55
+  if (avgWordsPerSentence >= 8 && avgWordsPerSentence <= 28) {
+    coherenceScore += 0.2
+  }
+  if (semanticDensity > 0.55) {
+    coherenceScore += 0.15
+  }
+  if (fillerRatio < 0.12) {
+    coherenceScore += 0.1
+  }
+  if (clarityScore > 0.75) {
+    coherenceScore += 0.05
+  }
+  coherenceScore = Math.min(1, Math.max(0.3, coherenceScore))
+
+  const closingWindow = words.filter(w => endSec - w.end < 4)
+  const closingText = closingWindow.map(w => w.word.toLowerCase()).join(' ')
+  const lastWord = closingWindow[closingWindow.length - 1]?.word ?? words[words.length - 1]?.word ?? ''
+  const hasHardStop = /[.!?…]$/.test(lastWord?.trim?.() || '')
+  const closurePhrases = ['that\'s why', 'so you can', 'and that\'s', 'that\'s how', 'in the end', 'the point is']
+  const trailingFiller = /(um|uh|like)$/i.test(lastWord?.trim?.() || '')
+
+  let closureScore = 0.45
+  if (hasHardStop) {
+    closureScore += 0.25
+  }
+  if (closurePhrases.some(p => closingText.includes(p))) {
+    closureScore += 0.15
+  }
+  if (closingWindow.length > 0 && closingWindow.some(w => /\bso\b|\btherefore\b|\bmeaning\b/i.test(w.word))) {
+    closureScore += 0.1
+  }
+  if (trailingFiller) {
+    closureScore -= 0.15
+  }
+  closureScore = Math.min(1, Math.max(0.2, closureScore))
+
+  const resolutionKeywords = ['because', 'so', "that\'s why", "that means", "which means", 'therefore', 'result', 'here\'s']
+  const payoffKeywords = ['so you can', 'that\'s how', 'in the end', 'the reason', 'the secret', 'so the', 'what happens']
+  const lowerText = text.toLowerCase()
+  const hasResolutionKeyword = resolutionKeywords.some(kw => lowerText.includes(kw))
+  const hasPayoff = payoffKeywords.some(kw => lowerText.includes(kw))
+  const earlyQuestion = words.filter(w => w.start - startSec < 6).some(w => /\?$/.test(w.word) || /^(how|why|what|when|where|who|can|should|would)\b/i.test(w.word))
+
+  let arcScore = 0.45
+  if (hasQuestion || earlyQuestion) {
+    arcScore += 0.2
+  }
+  if (hasResolutionKeyword) {
+    arcScore += 0.2
+  }
+  if (hasPayoff) {
+    arcScore += 0.1
+  }
+  if (closureScore > 0.7) {
+    arcScore += 0.05
+  }
+  arcScore = Math.min(1, Math.max(0.25, arcScore))
+
   return {
     hookScore,
     retentionScore,
@@ -228,47 +324,68 @@ function calculateSegmentFeatures(
     hasBoldClaim,
     hasNumbers,
     sceneChangeCount: sceneChangesInSegment,
-    wordCount: words.length
+    wordCount: words.length,
+    coherenceScore,
+    closureScore,
+    arcScore,
+    semanticDensity
   }
 }
 
 function scoreSegment(features: SegmentFeatures): number {
   return (
-    0.28 * features.hookScore +
+    0.24 * features.hookScore +
     0.18 * features.retentionScore +
-    0.16 * features.clarityScore +
-    0.12 * features.visualScore +
-    0.10 * features.noveltyScore +
-    0.10 * features.engagementScore +
-    0.06 * features.safetyScore
+    0.12 * features.clarityScore +
+    0.10 * features.coherenceScore +
+    0.10 * features.closureScore +
+    0.08 * features.arcScore +
+    0.08 * features.engagementScore +
+    0.05 * features.noveltyScore +
+    0.03 * features.visualScore +
+    0.02 * features.safetyScore
   )
 }
 
-function chooseDuration(features: SegmentFeatures, candidateDuration: number): { targetDuration: number; choice: 'short30' | 'mid45' | 'long60' } {
-  let prefer = 30
+function chooseDuration(
+  features: SegmentFeatures,
+  candidateDuration: number
+): { targetDuration: number; choice: 'short30' | 'mid45' | 'long60' } {
+  let prefer = Math.min(60, Math.max(24, Math.round(candidateDuration / 5) * 5))
   let choice: 'short30' | 'mid45' | 'long60' = 'short30'
-  
-  if (features.retentionScore > 0.7 && features.hookScore > 0.6) {
-    prefer = 45
+
+  const longFormSignals =
+    (features.retentionScore + features.closureScore + features.arcScore) / 3 > 0.68 &&
+    features.coherenceScore > 0.65 &&
+    features.semanticDensity > 0.55
+
+  if (candidateDuration >= 50 && longFormSignals) {
+    prefer = Math.min(candidateDuration, 60)
+    choice = 'long60'
+  } else if (
+    candidateDuration >= 40 &&
+    (features.retentionScore > 0.62 || features.arcScore > 0.6) &&
+    features.clarityScore > 0.55
+  ) {
+    prefer = Math.min(48, candidateDuration)
+    choice = 'mid45'
+  } else if (features.coherenceScore < 0.55 || features.closureScore < 0.5) {
+    prefer = Math.min(32, Math.max(24, candidateDuration - 3))
+    choice = 'short30'
+  } else if (features.engagementScore > 0.7 && candidateDuration > 35) {
+    prefer = Math.min(42, candidateDuration)
     choice = 'mid45'
   }
-  
-  if (features.hookScore > 0.8 && features.retentionScore > 0.8) {
-    prefer = 60
+
+  const minDuration = features.clarityScore > 0.7 && features.coherenceScore > 0.65 ? 24 : 20
+  const target = Math.max(minDuration, Math.min(prefer, candidateDuration))
+
+  if (target >= 55) {
     choice = 'long60'
+  } else if (target >= 38 && choice === 'short30') {
+    choice = 'mid45'
   }
-  
-  if (features.engagementScore > 0.75 && features.hookScore > 0.7) {
-    prefer = 60
-    choice = 'long60'
-  }
-  
-  if (features.clarityScore < 0.5) {
-    prefer = Math.min(prefer, 35)
-  }
-  
-  const target = Math.min(Math.max(20, prefer), candidateDuration)
-  
+
   return { targetDuration: target, choice }
 }
 
@@ -286,6 +403,15 @@ function generateRationale(features: SegmentFeatures, score: number): string {
   }
   if (features.engagementScore > 0.7) {
     reasons.push({ text: 'audience engagement hotspot', value: features.engagementScore })
+  }
+  if (features.coherenceScore > 0.7) {
+    reasons.push({ text: 'coherent storytelling', value: features.coherenceScore })
+  }
+  if (features.closureScore > 0.65) {
+    reasons.push({ text: 'satisfying payoff', value: features.closureScore })
+  }
+  if (features.arcScore > 0.65) {
+    reasons.push({ text: 'clear question→answer arc', value: features.arcScore })
   }
   if (features.hasQuestion) {
     reasons.push({ text: 'question hook', value: 0.8 })
@@ -305,6 +431,60 @@ function generateRationale(features: SegmentFeatures, score: number): string {
   }
   
   return `Strong because: ${top3.join(', ')}`
+}
+
+function adjustSegmentToNarrativeBoundary(
+  words: TranscriptWord[],
+  startSec: number,
+  hardEndSec: number,
+  targetDuration: number
+): { words: TranscriptWord[]; endSec: number } {
+  if (words.length === 0) {
+    return { words, endSec: startSec }
+  }
+
+  const maxEnd = Math.min(hardEndSec, startSec + 75)
+  const minEnd = Math.min(maxEnd, startSec + Math.max(18, targetDuration - 4))
+  const desiredEnd = Math.min(maxEnd, startSec + targetDuration)
+  const searchEnd = Math.min(maxEnd, startSec + targetDuration + 6)
+
+  let cutoffIndex = words.findIndex(w => w.end >= desiredEnd)
+  if (cutoffIndex === -1) {
+    cutoffIndex = words.length - 1
+  }
+
+  let chosenIndex = cutoffIndex
+
+  for (let i = cutoffIndex; i < words.length; i++) {
+    const w = words[i]
+    if (w.end > searchEnd) {
+      break
+    }
+    const trimmed = w.word.trim()
+    if (/[.!?…]$/.test(trimmed) || /--$/.test(trimmed)) {
+      chosenIndex = i
+      break
+    }
+    const next = words[i + 1]
+    if (next) {
+      const gap = next.start - w.end
+      if (gap >= 0.8 && w.end >= minEnd) {
+        chosenIndex = i
+        break
+      }
+    }
+  }
+
+  if (words[chosenIndex].end - startSec < 18 && words[words.length - 1].end - startSec >= 18) {
+    while (chosenIndex < words.length - 1 && words[chosenIndex].end - startSec < 18) {
+      chosenIndex += 1
+    }
+  }
+
+  const endSec = Math.min(maxEnd, words[chosenIndex].end)
+  const adjustedWords = words.filter(w => w.end <= endSec + 1e-3)
+
+  return { words: adjustedWords, endSec }
 }
 
 export function detectEnhancedSegments(
@@ -373,27 +553,39 @@ export function detectEnhancedSegments(
           continue
         }
         
-        const features = calculateSegmentFeatures(segWords, startSec, endSec, sceneChanges, commentHotspots)
-        const score = scoreSegment(features)
-        
-        if (score < 0.5)
+        const initialFeatures = calculateSegmentFeatures(segWords, startSec, endSec, sceneChanges, commentHotspots)
+        const initialScore = scoreSegment(initialFeatures)
+
+        if (initialScore < 0.5)
         {
           continue
         }
-        
-        const { targetDuration, choice } = chooseDuration(features, duration)
-        const adjustedEndSec = Math.min(endSec, startSec + targetDuration)
-        const adjustedWords = segWords.filter(w => w.end <= adjustedEndSec)
-        
+
+        const { targetDuration, choice } = chooseDuration(initialFeatures, duration)
+        const { words: adjustedWords, endSec: adjustedEndSec } = adjustSegmentToNarrativeBoundary(
+          segWords,
+          startSec,
+          endSec,
+          targetDuration
+        )
+
         if (adjustedWords.length < 8)
         {
           continue
         }
-        
+
+        const finalFeatures = calculateSegmentFeatures(adjustedWords, startSec, adjustedEndSec, sceneChanges, commentHotspots)
+        const finalScore = scoreSegment(finalFeatures)
+
+        if (finalScore < 0.52)
+        {
+          continue
+        }
+
         const text = adjustedWords.map(w => w.word).join(' ')
         const hook = adjustedWords.filter(w => w.start - startSec < 3).map(w => w.word).join(' ').trim()
-        const rationale = generateRationale(features, score)
-        
+        const rationale = generateRationale(finalFeatures, finalScore)
+
         candidates.push({
           startSec,
           endSec: adjustedEndSec,
@@ -401,8 +593,8 @@ export function detectEnhancedSegments(
           words: adjustedWords,
           text,
           hook: hook || text.substring(0, 50),
-          score,
-          features,
+          score: finalScore,
+          features: finalFeatures,
           rationaleShort: rationale,
           durationChoice: choice,
           chapterTitle: window.chapterTitle
@@ -451,22 +643,32 @@ function findIntroChapterIndex(chapters: Chapter[], detectedLanguage?: string): 
 function applyQualityGuards(segments: EnhancedSegment[]): EnhancedSegment[] {
   return segments.filter(seg => {
     const first3sWords = seg.words.filter(w => w.start - seg.startSec < 3)
-    
+
     if (first3sWords.length < 3)
     {
       return false
     }
-    
+
     if (seg.features.safetyScore < 0.5)
     {
       return false
     }
-    
+
     if (seg.features.clarityScore < 0.3)
     {
       return false
     }
-    
+
+    if (seg.features.coherenceScore < 0.45)
+    {
+      return false
+    }
+
+    if (seg.features.closureScore < 0.4)
+    {
+      return false
+    }
+
     return true
   })
 }
