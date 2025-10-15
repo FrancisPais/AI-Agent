@@ -412,38 +412,38 @@ function chooseDuration(
   features: SegmentFeatures,
   candidateDuration: number
 ): { targetDuration: number; choice: 'short30' | 'mid45' | 'long60' } {
-  let prefer = Math.min(80, Math.max(24, Math.round(candidateDuration / 5) * 5))
+  let prefer = Math.min(60, Math.max(24, Math.round(candidateDuration / 5) * 5))
   let choice: 'short30' | 'mid45' | 'long60' = 'short30'
 
   const longFormSignals =
-    (features.retentionScore + features.closureScore + features.arcScore) / 3 > 0.66 &&
-    features.coherenceScore > 0.63 &&
+    (features.retentionScore + features.closureScore + features.arcScore) / 3 > 0.68 &&
+    features.coherenceScore > 0.65 &&
     features.semanticDensity > 0.55
 
-  if (candidateDuration >= 65 && longFormSignals) {
-    prefer = Math.min(candidateDuration, 80)
+  if (candidateDuration >= 50 && longFormSignals) {
+    prefer = Math.min(candidateDuration, 60)
     choice = 'long60'
   } else if (
-    candidateDuration >= 45 &&
+    candidateDuration >= 40 &&
     (features.retentionScore > 0.62 || features.arcScore > 0.6) &&
     features.clarityScore > 0.55
   ) {
-    prefer = Math.min(55, candidateDuration)
+    prefer = Math.min(48, candidateDuration)
     choice = 'mid45'
   } else if (features.coherenceScore < 0.55 || features.closureScore < 0.5) {
     prefer = Math.min(32, Math.max(24, candidateDuration - 3))
     choice = 'short30'
-  } else if (features.engagementScore > 0.7 && candidateDuration > 40) {
-    prefer = Math.min(50, candidateDuration)
+  } else if (features.engagementScore > 0.7 && candidateDuration > 35) {
+    prefer = Math.min(42, candidateDuration)
     choice = 'mid45'
   }
 
-  const minDuration = features.clarityScore > 0.7 && features.coherenceScore > 0.65 ? 28 : 20
+  const minDuration = features.clarityScore > 0.7 && features.coherenceScore > 0.65 ? 24 : 20
   const target = Math.max(minDuration, Math.min(prefer, candidateDuration))
 
-  if (target >= 70) {
+  if (target >= 55) {
     choice = 'long60'
-  } else if (target >= 42 && choice === 'short30') {
+  } else if (target >= 38 && choice === 'short30') {
     choice = 'mid45'
   }
 
@@ -504,7 +504,7 @@ function adjustSegmentToNarrativeBoundary(
     return { words, endSec: startSec }
   }
 
-  const maxEnd = Math.min(hardEndSec, startSec + 82)
+  const maxEnd = Math.min(hardEndSec, startSec + 75)
   const minEnd = Math.min(maxEnd, startSec + Math.max(18, targetDuration - 4))
   const desiredEnd = Math.min(maxEnd, startSec + targetDuration)
   const searchEnd = Math.min(maxEnd, startSec + targetDuration + 6)
