@@ -418,11 +418,11 @@ function estimateBodyBox(faceBox: FaceBox, baseW: number, baseH: number): BodyBo
   }
 }
 
-function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: string }>, tracks: FaceTrack[], baseW: number, baseH: number, c: Constraints): CropKF[] {
+export function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: string }>, tracks: FaceTrack[], baseW: number, baseH: number, c: Constraints): CropKF[] {
   const out: CropKF[] = []
   const targetW = Math.floor(baseH * 9 / 16)
   const targetH = baseH
-  
+
   for (const m of mapping)
   {
     const tr = tracks.find(t => t.id === m.trackId)
@@ -460,14 +460,66 @@ function buildKeyframes(mapping: Array<{ start: number; end: number; trackId: st
         cy = b.y + b.h * (0.5 - c.centerBiasY)
       }
       
-      let x = Math.round(cx - targetW / 2)
+      const marginPx = Math.max(0, c.margin) * targetW
+      const minCropX = 0
+      const maxCropX = Math.max(0, baseW - targetW)
+
+      let idealX = cx - targetW / 2
+
+      if (marginPx > 0)
+      {
+        const marginMin = cx - targetW + marginPx
+        const marginMax = cx - marginPx
+        const allowedMin = Math.max(minCropX, marginMin)
+        const allowedMax = Math.min(maxCropX, marginMax)
+
+        if (allowedMin <= allowedMax)
+        {
+          if (idealX < allowedMin)
+          {
+            idealX = allowedMin
+          }
+          else if (idealX > allowedMax)
+          {
+            idealX = allowedMax
+          }
+        }
+        else if (cx < marginPx)
+        {
+          idealX = minCropX
+        }
+        else if (baseW - cx < marginPx)
+        {
+          idealX = maxCropX
+        }
+      }
+
+      let x = Math.round(idealX)
+
+      if (marginPx > 0)
+      {
+        const allowedMin = Math.max(minCropX, Math.ceil(cx - targetW + marginPx))
+        const allowedMax = Math.min(maxCropX, Math.floor(cx - marginPx))
+
+        if (allowedMin <= allowedMax)
+        {
+          if (x < allowedMin)
+          {
+            x = allowedMin
+          }
+          else if (x > allowedMax)
+          {
+            x = allowedMax
+          }
+        }
+      }
+
+      x = Math.max(minCropX, Math.min(x, maxCropX))
       let y = Math.round(cy - targetH / 2)
-      
-      x = Math.max(0, Math.min(x, baseW - targetW))
-      
+
       const safeTop = Math.round(targetH * c.safeTop)
       const safeBottom = Math.round(targetH * c.safeBottom)
-      
+
       y = Math.max(-safeTop, Math.min(y, baseH - targetH + safeBottom))
       
       out.push({ t: b.t, x, y, w: targetW, h: targetH })
