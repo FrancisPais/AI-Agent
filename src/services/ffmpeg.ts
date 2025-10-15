@@ -201,21 +201,230 @@ export async function extractThumbnail(videoPath: string, outputPath: string, ti
   ])
 }
 
-export function createSrtFile(words: Array<{ word: string; start: number; end: number }>, outputPath: string): void {
-  let srtContent = ''
-  
-  for (let i = 0; i < words.length; i++)
+const MAX_CUE_DURATION = 4.5
+const MAX_CUE_GAP = 0.8
+const MAX_TOTAL_CHARACTERS = 84
+const MAX_LINE_LENGTH = 42
+const MAX_LINES_PER_CUE = 2
+const IDEAL_CHAR_BREAK = 28
+const SENTENCE_ENDING = /[.!?…]/
+const CLAUSE_ENDING = /[,;:\u2014\u2013]/
+
+interface TimedWord {
+  word: string
+  start: number
+  end: number
+}
+
+export function createSrtFile(words: Array<TimedWord>, outputPath: string): void {
+  const sanitizedWords = words
+    .map((w) => ({ ...w, word: sanitizeWord(w.word) }))
+    .filter((w) => w.word.length > 0)
+
+  if (sanitizedWords.length === 0)
   {
-    const word = words[i]
-    const startTime = formatSrtTime(word.start)
-    const endTime = formatSrtTime(word.end)
-    
-    srtContent += `${i + 1}\n`
-    srtContent += `${startTime} --> ${endTime}\n`
-    srtContent += `${word.word}\n\n`
+    writeFileSync(outputPath, '')
+    return
   }
-  
+
+  const cues: string[] = []
+  let currentCue: TimedWord[] = []
+  let cueStart = sanitizedWords[0].start
+
+  const flushCue = () => {
+    if (currentCue.length === 0)
+    {
+      return
+    }
+
+    const startTime = formatSrtTime(cueStart)
+    const endTime = formatSrtTime(currentCue[currentCue.length - 1].end)
+    const lines = formatCueLines(currentCue)
+
+    cues.push([
+      String(cues.length + 1),
+      `${startTime} --> ${endTime}`,
+      ...lines
+    ].join('\n'))
+
+    currentCue = []
+  }
+
+  sanitizedWords.forEach((word, index) => {
+    const previousWord = currentCue[currentCue.length - 1]
+    if (previousWord)
+    {
+      const gap = word.start - previousWord.end
+      if (gap >= MAX_CUE_GAP)
+      {
+        flushCue()
+      }
+    }
+
+    if (currentCue.length === 0)
+    {
+      cueStart = word.start
+    }
+
+    const candidateCue = [...currentCue, word]
+    const candidateDuration = word.end - cueStart
+    const candidateChars = measureCueCharacters(candidateCue)
+
+    if (currentCue.length > 0 && (candidateDuration > MAX_CUE_DURATION || candidateChars > MAX_TOTAL_CHARACTERS))
+    {
+      flushCue()
+      cueStart = word.start
+    }
+
+    currentCue.push(word)
+
+    const currentDuration = currentCue[currentCue.length - 1].end - cueStart
+    const currentChars = measureCueCharacters(currentCue)
+    const nextWord = sanitizedWords[index + 1]
+    const endsSentence = endsWithRegex(word.word, SENTENCE_ENDING)
+    const endsClause = endsWithRegex(word.word, CLAUSE_ENDING)
+
+    if (endsSentence)
+    {
+      flushCue()
+      return
+    }
+
+    if (endsClause && (currentChars >= IDEAL_CHAR_BREAK || currentDuration >= MAX_CUE_DURATION / 2))
+    {
+      flushCue()
+      return
+    }
+
+    if (!nextWord)
+    {
+      flushCue()
+      return
+    }
+
+    const gapToNext = nextWord.start - word.end
+    if (gapToNext >= MAX_CUE_GAP)
+    {
+      flushCue()
+      return
+    }
+
+    if (currentDuration >= MAX_CUE_DURATION || currentChars >= MAX_TOTAL_CHARACTERS)
+    {
+      flushCue()
+    }
+  })
+
+  flushCue()
+
+  const srtContent = cues.join('\n\n') + '\n'
   writeFileSync(outputPath, srtContent)
+}
+
+function sanitizeWord(word: string): string {
+  return word.replace(/\s+/g, ' ').trim()
+}
+
+function measureCueCharacters(words: TimedWord[]): number {
+  return buildCueText(words).length
+}
+
+function buildCueText(words: TimedWord[]): string {
+  const joined = words.map((w) => w.word).join(' ')
+  return joined
+    .replace(/\s+([,.;!?…:\u2014\u2013])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function formatCueLines(words: TimedWord[]): string[] {
+  const text = buildCueText(words)
+  if (text.length === 0)
+  {
+    return ['']
+  }
+
+  let lines = wrapText(text, MAX_LINE_LENGTH)
+  if (lines.length > MAX_LINES_PER_CUE)
+  {
+    lines = rebalanceLines(words)
+  }
+  return lines
+}
+
+function wrapText(text: string, maxLen: number): string[] {
+  const tokens = text.split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let current = ''
+
+  for (const token of tokens)
+  {
+    const candidate = current.length > 0 ? `${current} ${token}` : token
+    if (candidate.length <= maxLen || current.length === 0)
+    {
+      current = candidate
+    }
+    else
+    {
+      lines.push(current)
+      current = token
+    }
+  }
+
+  if (current.length > 0)
+  {
+    lines.push(current)
+  }
+
+  return lines
+}
+
+function rebalanceLines(words: TimedWord[]): string[] {
+  const tokens = buildCueText(words).split(/\s+/).filter(Boolean)
+  if (tokens.length === 0)
+  {
+    return ['']
+  }
+
+  let bestSplit = Math.ceil(tokens.length / 2)
+  let bestLines = [
+    tokens.slice(0, bestSplit).join(' '),
+    tokens.slice(bestSplit).join(' ')
+  ]
+  let bestScore = Math.max(...bestLines.map((l) => l.length))
+
+  for (let i = 1; i < tokens.length; i++)
+  {
+    const left = tokens.slice(0, i).join(' ')
+    const right = tokens.slice(i).join(' ')
+    const leftLength = left.length
+    const rightLength = right.length
+    const score = Math.max(leftLength, rightLength)
+    if (leftLength <= MAX_LINE_LENGTH && rightLength <= MAX_LINE_LENGTH && score < bestScore)
+    {
+      bestLines = [left, right]
+      bestScore = score
+    }
+  }
+
+  if (bestLines[0].length <= MAX_LINE_LENGTH && bestLines[1].length <= MAX_LINE_LENGTH)
+  {
+    return bestLines
+  }
+
+  const wrapped = wrapText(tokens.join(' '), MAX_LINE_LENGTH)
+  if (wrapped.length <= MAX_LINES_PER_CUE)
+  {
+    return wrapped
+  }
+
+  const firstLines = wrapped.slice(0, MAX_LINES_PER_CUE - 1)
+  const remaining = wrapped.slice(MAX_LINES_PER_CUE - 1).join(' ')
+  return [...firstLines, remaining.trim()].filter((line) => line.length > 0)
+}
+
+function endsWithRegex(text: string, regex: RegExp): boolean {
+  return regex.test(text.slice(-1))
 }
 
 function formatSrtTime(seconds: number): string {
